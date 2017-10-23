@@ -173,6 +173,8 @@ elif args.mode == 'plot_error_figs':
         plt.ylim(0, 2)
         plt.axhline(1, linewidth=1, linestyle=':', color='0.5')
         sns.despine()
+        
+        # plot boxplot
     
     
 
@@ -242,16 +244,13 @@ if args.mode == 'plot_single_muts':
                        hue_order=['S1a', 'S1b', 'S2a', 'S2b']); plt.ylim(-0.5, 4.5)
         
     # plot difference from expected
-    for col in [x+'_ss' for x in names]:
+    for col in param_values.columns.tolist():
         sim_values = [st.norm.rvs(scale=i) for  i in np.random.choice(sigma_all.loc[:, col].dropna(), size=1000)]
         tectplots.figure()
         tectplots.plot_two_dists(diff_all.loc[:, col].dropna(), sim_values)
         plt.xlim(-2, 2)
         plt.ylim(0, 3.6)
         plt.tight_layout()
-    
-    # correct for structure
-    param_errors = compare.param_errors
-    param_values = compare.param_values.loc[single_muts.unique_index] + pd.concat({'hPUM2':single_muts.loc[:, '25_intr_dG'] - single_muts.loc[:, '25_dG'] ,
-                                                                                   'hPUM2_37':single_muts.loc[:, '37_intr_dG'] - single_muts.loc[:, '37_dG']}, axis=1)
+
+
         

@@ -32,7 +32,7 @@ class MyWorkflow(sciluigi.WorkflowTask):
     motif_name = luigi.Parameter(default='hPUM2')
     num_muts = luigi.IntParameter(default=1)
     window_size = luigi.IntParameter(default=200)
-    temperature = luigi.IntParameter(default=25)
+    temperature = luigi.IntParameter(default=37)
     
     # transcript data
     tpm_file = luigi.Parameter(default='RNAseq/transcript_quant/rna_seq_combined.tpm.above_0.01_both.dat')
@@ -54,6 +54,7 @@ class MyWorkflow(sciluigi.WorkflowTask):
         filtermotifbed = self.new_task('filtermotifbed', ApplyFilterBedFile, transcript_bed=self.transcript_bed )
         filtermotifbed.in_filt_dat = annmotifbed.out_filt_dat
         
+        """
         # make footprint
         makefootprintall = {}
         outdir_footprint = os.path.join(self.outdir, 'footprints')
@@ -62,7 +63,8 @@ class MyWorkflow(sciluigi.WorkflowTask):
                                           outdir=outdir_footprint, cores=self.cores)
             makefootprint.in_bed = filtermotifbed.out_filt_bed
             makefootprintall[key] = makefootprint
-            
+        """
+        
         # make a random bed
         makerandombed = self.new_task('makerandombed', MakeRandomBed, regions=self.regions, window_size=len(self.consensus_seq), step_size=len(self.consensus_seq)*5, outdir=os.path.join(self.outdir, 'beds'))
         annrandombed = self.new_task('annrandombed', AnnBedFile, genome=self.genome)
@@ -136,7 +138,7 @@ class MyWorkflow(sciluigi.WorkflowTask):
         
         # find the secondary structure energy of the non-random areas
         secstructuremotif = {}
-        outdir_ss = os.path.join(self.outdir, 'sec_structure')
+        outdir_ss = os.path.join(self.outdir, 'sec_structure_%d'%self.temperature)
         for window_size in [50, 75, 100]:
             findsequence = self.new_task('findsequence_%d'%(window_size), FindSequence, genome_fasta=self.genome_fasta,
                                          consensus_seq=self.consensus_seq, check_for_seq=self.consensus_seq[:4],
