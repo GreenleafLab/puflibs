@@ -32,7 +32,7 @@ class MyWorkflow(sciluigi.WorkflowTask):
     motif_name = luigi.Parameter(default='hPUM2')
     num_muts = luigi.IntParameter(default=1)
     window_size = luigi.IntParameter(default=200)
-    temperature = luigi.IntParameter(default=37)
+    temperature = luigi.IntParameter(default=0)
     
     # transcript data
     tpm_file = luigi.Parameter(default='RNAseq/transcript_quant/rna_seq_combined.tpm.above_0.01_both.dat')
@@ -43,6 +43,9 @@ class MyWorkflow(sciluigi.WorkflowTask):
     biomart_file = luigi.Parameter(default='annotations/ensemble_gene_converter_biomart.txt')
     
     def workflow(self):
+        # load RNA seq data
+        
+        
         # make homer motif
         makehomermotif = self.new_task('makehomermotif', MakeHomerMotif, num_muts=self.num_muts, outdir=self.outdir, seq=self.consensus_seq, motif_name=self.motif_name)
         
@@ -180,6 +183,131 @@ class MyWorkflow(sciluigi.WorkflowTask):
         #makeplots.in_signal_rand = [target.out_signal for target in motifsignalboth['random'].values()]
         
         return combinedata
+
+class DownloadRNAseq(sciluigi.Task):
+    """Use wget to download RNA seq data."""
+    # parameters
+    outdir = luigi.Parameter()
+
+    # input
+    # no inputs
+    
+    # outputs
+    def out_rna1(self):
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'expression_data', 'rna_seq_rep1.dat'))
+    
+    def out_rna2(self):
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'expression_data', 'rna_seq_rep1.dat'))
+    
+    # run
+    def run(self):
+        # make out directory if it doesn't exist
+        dirname = os.path.dirname(self.out_homer_motif().path)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname)
+            
+        # load rep1 and rep2 of the RNA seq data
+        subprocess.call('wget https://www.encodeproject.org/files/ENCFF272HJP/@@download/ENCFF272HJP.tsv', shell=True)
+        subprocess.call('mv ENCFF272HJP.tsv %s'%self.out_rna1().path, shell=True)
+        
+        # load rep1 and rep2 of the RNA seq data
+        subprocess.call('wget https://www.encodeproject.org/files/ENCFF471SEN/@@download/ENCFF471SEN.tsv', shell=True)
+        subprocess.call('mv ENCFF471SEN.tsv %s'%self.out_rna2().path, shell=True)
+
+  
+class GetExpressedGenes(sciluigi.Task):
+    """Process RNA seq expression data and save transcripts with some expression"""
+    # parameters
+    outdir = luigi.Parameter()
+
+    # input
+    in_rna1 = None
+    in_rna2 = None
+    
+    # outputs
+    def out_tpm(self):
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'expression_data', 'rna_seq_combined.tpm.above_0.01_both.dat'))
+    
+    # run
+    def run(self):
+        # make out directory if it doesn't exist
+        dirname = os.path.dirname(self.out_homer_motif().path)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname)
+            
+        # load rep1 and rep2 of the RNA seq data
+        rep1 = pd.read_table(self.in_rna1().path)
+        rep2 = pd.read_table(self.in_rna2().path)
+        tpm = pd.concat([rep1.set_index('transcript_id').TPM.rename('rep1'),
+                         rep2.set_index('transcript_id').TPM.rename('rep2')], axis=1);
+        tpm.loc[(np.log10(tpm + 1E-3) > -2).all(axis=1)].to_csv(self.out_tpm().path, sep='\t')
+
+class FindExonicRegions(sciluigi.Task):
+    """Download the exons, st, merge. """
+    # parameters
+    outdir = luigi.Parameter()
+
+    # input
+    
+    def out_annotations(self):
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'gencode.v24.primary_assembly.annotation.gtf.gz'))
+
+    def out_bed_unprocessed(self):
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'exons_unprocessed.bed'))
+
+    def out_bed_processed(self):
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'exons_processed.bed'))
+
+    def out_bed_merged(self):
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'exons_processed.bed'))
+    
+    def run(self):
+        # make out directory if it doesn't exist
+        dirname = os.path.dirname(self.out_annotations().path)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname)
+            
+        # download the gencode annotation file
+        task1 = 'wget https://www.encodeproject.org/files/gencode.v24.primary_assembly.annotation/@@download/gencode.v24.primary_assembly.annotation.gtf.gz'
+        log.info(task1)
+        subprocess.call(task1, shell=True)
+        subprocess.call('mv gencode.v24.primary_assembly.annotation.gtf.gz %s'%self.out_annotations().path, shell=True)
+        
+        # process to save exons
+        task2 = ('gunzip -c gencode.v24.primary_assembly.annotation.gtf.gz | awk \'{if ($3=="exon") print}\' | '
+                 'awk \'{OFS="\\t"}{n=split($0, a, "\\t"); print $1, $4-1, $5, $3"_"(NR-1), $6, $7, a[n] }\' > %s'%self.out_bed_unprocessed().path)
+        log.info(task2)
+        subprocess.call(task2, shell=True)
+        
+        ##### process to make annotations more reasonable. #####
+        with open(self.out_bed_unprocessed().path) as f:
+            lines = f.readlines()
+        
+        # go through lines and save fields
+        log.info('processing annotation lines')
+        line_dict = {}
+        for i, line in enumerate(lines):
+            line_series = pd.Series(line.split('\t')[:-1], index=bedFields)
+            line_annots = pd.Series({val.split()[0]:val.split()[1].replace('"', '') for val in line.split('\t')[-1].strip('\n;').split('; ')})
+            line_dict[i] = pd.concat([line_series, line_annots])
+        
+        # concat fields
+        log.info('concatenating annotations')
+        line_table = pd.concat(line_dict).unstack()
+        
+        # reorder columns
+        cols = line_table.columns.tolist()
+        cols_ordered = bedFields + [col for col in cols if col not in bedFields]
+        line_table = line_table.loc[:, cols_ordered]
+        
+        # save output with fields prepended by comment for use in bed
+        line_table.columns = ['#'+col if i==0 else col for i, col in enumerate(cols_ordered)]
+        line_table.sort_values(['chrm', 'start', 'end']).to_csv(self.out_bed_processed().path, sep='\t', index=False)
+        
+        # merge bed file
+        task3 = 'bedtools merge -i %s -c 10 -o distinct > %s'%(self.out_bed_processed().path, self.out_bed_merged().path)
+        log.info(task3)
+        subprocess.call(task3, shell=True)        
     
 
 class MakeHomerMotif(sciluigi.Task):
