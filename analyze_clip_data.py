@@ -257,8 +257,7 @@ class DownloadGencode(sciluigi.Task):
         log.info(task1)
         subprocess.call(task1, shell=True)
         subprocess.call('mv gencode.v24.primary_assembly.annotation.gtf.gz %s'%self.out_annotations().path, shell=True)
-        
-  
+    
 class GetExpressedGenes(sciluigi.Task):
     """Process RNA seq expression data and save transcripts with some expression"""
     # parameters
@@ -287,73 +286,6 @@ class GetExpressedGenes(sciluigi.Task):
                          rep2.set_index('transcript_id').TPM.rename('rep2')], axis=1);
         eps = self.tpm_cutoff/10.
         tpm.loc[(np.log10(tpm + eps) > np.log10(self.tpm_cutoff)).all(axis=1)].to_csv(self.out_tpm().path, sep='\t')
-
-class FindExonicRegions(sciluigi.Task):
-    """Download the exons, st, merge. """
-    # parameters
-    outdir = luigi.Parameter()
-
-    # input
-    
-
-    def out_bed_unprocessed(self):
-        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'exons_unprocessed.bed'))
-
-    def out_bed_processed(self):
-        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'exons_processed.bed'))
-    
-    def out_bed_sorted(self):
-        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'exons_processed_st.bed'))
-
-    def out_bed(self):
-        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'exons_processed_st_merged.bed'))
-    
-    def run(self):
-        # make out directory if it doesn't exist
-        dirname = os.path.dirname(self.out_annotations().path)
-        if not os.path.exists(dirname):
-            os.makedirs(dirname)
-            
-
-        # process to save exons
-        task2 = ('gunzip -c %s | awk \'{if ($3=="exon") print}\' | '
-                 'awk \'{OFS="\\t"}{n=split($0, a, "\\t"); print $1, $4-1, $5, $3"_"(NR-1), $6, $7, a[n] }\' > %s')%(self.out_annotations().path, self.out_bed_unprocessed().path)
-        log.info(task2)
-        subprocess.call(task2, shell=True)
-        
-        ##### process to make annotations more reasonable. #####
-        with open(self.out_bed_unprocessed().path) as f:
-            lines = f.readlines()
-        
-        # go through lines and save fields
-        log.info('processing annotation lines')
-        line_dict = {}
-        for i, line in enumerate(lines):
-            line_series = pd.Series(line.split('\t')[:-1], index=variables.bed_fields)
-            line_annots = pd.Series({val.split()[0]:val.split()[1].replace('"', '') for val in line.split('\t')[-1].strip('\n;').split('; ')})
-            line_dict[i] = pd.concat([line_series, line_annots])
-        
-        # concat fields
-        log.info('concatenating annotations')
-        line_table = pd.concat(line_dict).unstack()
-        
-        # reorder columns
-        cols = line_table.columns.tolist()
-        cols_ordered = variables.bed_fields + [col for col in cols if col not in variables.bed_fields]
-        line_table = (line_table.loc[:, cols_ordered].sort_values(['chrm', 'start', 'stop'])).copy()
-        
-        # save output with fields prepended by comment for use in bed
-        line_table.columns = ['#'+col if i==0 else col for i, col in enumerate(cols_ordered)]
-        line_table.to_csv(self.out_bed_processed().path, sep='\t', index=False)
-        
-        # merge bed file
-        task3 = 'bedtools sort -i %s > %s'%(self.out_bed_processed().path, self.out_bed_sorted().path)
-        log.info(task3)
-        subprocess.call(task3, shell=True)
-        
-        task4 = 'bedtools merge -i %s -c 20 -o distinct |  awk \'BEGIN {print "%s"} {print}\'> %s'%(self.out_bed_sorted().path, '#' + '\\t'.join(variables.bed_fields), self.out_bed().path)
-        log.info(task4)
-        subprocess.call(task4, shell=True)        
 
 class FindTranscribedRegions(sciluigi.Task):
     """Download the exons, st, merge. """
@@ -392,45 +324,6 @@ class FindTranscribedRegions(sciluigi.Task):
         task4 = 'bedtools merge -i %s -c 4 -o first |  awk \'BEGIN {print "%s"} {print}\'> %s'%(self.out_bed_sorted().path, '#' + '\\t'.join(variables.bed_fields), self.out_bed().path)
         log.info(task4)
         subprocess.call(task4, shell=True)   
-
-
-class FindExpressedRegions(sciluigi.Task):
-    """Download the exons, st, merge. """
-    # parameters
-    outdir = luigi.Parameter()
-
-    # input
-    in_bed = None
-    in_tpm = None
-    
-    def out_bed(self):
-        basename2 = os.path.splitext(os.path.basename(self.in_tpm().path))[0]
-        basename = os.path.splitext(os.path.basename(self.in_bed().path))[0]
-        return sciluigi.TargetInfo(self, os.path.join(self.outdir, basename + '_' + basename2 + '.bed'))
-
-
-    
-    def run(self):
-        # make out directory if it doesn't exist
-        dirname = os.path.dirname(self.out_bed().path)
-        if not os.path.exists(dirname):
-            os.makedirs(dirname)
-        
-        # load merged exonic regions
-        regions = processing.load_bed(self.in_bed().path)
-        regions.rename(columns={'name':'transcript_ids'}, inplace=True);
-        regions.loc[:, 'name'] = ['exon_%d'%i for i in range(len(regions))];
-        names = regions.transcript_ids.str.split(',', expand=True).replace([None], np.nan);
-        
-        # load transcripts with tpm > cutoff
-        a = pd.read_table(self.in_tpm().path, index_col=0);
-        
-        # find those regions with transcript ids in a
-        names_match = pd.concat({col:pd.Series(np.in1d(names.loc[:, col].dropna(), a.index.tolist()), index=names.loc[:, col].dropna().index) for col in names}, axis=1);
-        subset = names_match.fillna(False).any(axis=1);
-        cols_ordered = variables.bed_fields + ['transcript_ids'];
-        sub_bed = regions.loc[subset, cols_ordered]
-        processing.save_bed(sub_bed.fillna('.'), self.out_bed().path)
 
 class MakeHomerMotif(sciluigi.Task):
     """Make a motif using HOMER and consensus seq."""
