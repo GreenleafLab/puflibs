@@ -9,7 +9,7 @@ import numpy as np
 import ipdb
 import matplotlib.pyplot as plt
 import seaborn as sns
-from puflibs import variables
+from puflibs import variables, processing, scltasks
 
 log = logging.getLogger('sciluigi-interface')
 
@@ -33,8 +33,10 @@ class MyWorkflow(sciluigi.WorkflowTask):
     num_muts = luigi.IntParameter(default=1)
     window_size = luigi.IntParameter(default=200)
     temperature = luigi.IntParameter(default=0)
+    num_random = luigi.IntParameter(default=1000000)
     
     # transcript data
+    tpm_cutoff = luigi.FloatParameter(default = 0.01)
     tpm_file = luigi.Parameter(default='RNAseq/transcript_quant/rna_seq_combined.tpm.above_0.01_both.dat')
     rnaseq_file1 = luigi.Parameter(default='RNAseq/transcript_quant/ENCFF272HJP.rep1.tsv')
     rnaseq_file2 = luigi.Parameter(default='RNAseq/transcript_quant/ENCFF471SEN.rep2.tsv')
@@ -44,18 +46,41 @@ class MyWorkflow(sciluigi.WorkflowTask):
     
     def workflow(self):
         # load RNA seq data
+        downloadrna = self.new_task('downloadrna', DownloadRNAseq, outdir=self.outdir)
+        getexpressedtranscripts = self.new_task('getexpressedtranscripts', GetExpressedGenes, outdir=self.outdir, tpm_cutoff=self.tpm_cutoff)
+        getexpressedtranscripts.in_rna1 = downloadrna.out_rna1
+        getexpressedtranscripts.in_rna2 = downloadrna.out_rna2
+        
+        # download and process gencode data
+        downloadgencode = self.new_task('downloadgencode', DownloadGencode, outdir=self.outdir)
+        findtranscribedregions = self.new_task('findtranscribedregions', FindTranscribedRegions, outdir=self.outdir)
+        findtranscribedregions.in_annotations = downloadgencode.out_annotations
+        
+        # download and process CLIP data
+        downloadCLIP = self.new_task('downloadgencode', DownloadGencode, outdir=self.outdir)
         
         
         # make homer motif
         makehomermotif = self.new_task('makehomermotif', MakeHomerMotif, num_muts=self.num_muts, outdir=self.outdir, seq=self.consensus_seq, motif_name=self.motif_name)
         
-        # make motif bed, annotate and filter
-        makemotifbed = self.new_task('makemotifbed', MakeBedFile, genome=self.genome, regions=self.regions)
+        # make motif bed
+        makemotifbed = self.new_task('makemotifbed', MakeBedFileHomer, genome=self.genome, outdir=os.path.join(self.outdir, 'beds'))
         makemotifbed.in_homer_motif = makehomermotif.out_homer_motif
+        makemotifbed.in_regions = findtranscribedregions.out_bed
+        
+        # make random bed
+        makerandombed = self.new_task('makerandombed', MakeRandomBed, num_random=self.num_random, outdir=os.path.join(self.outdir, 'beds'))
+        makerandombed.in_regions = findtranscribedregions.out_bed
+        
+        # combine motif and random bed, annotate, and filter
+        combinebed = self.new_task('combinebeds', scltasks.CombineBeds, outdir=os.path.join(self.outdir, 'beds'))
+        combinebed.in_beds = [makemotifbed.out_bed, makerandombed.out_bed]
+        
+        # annotate and filter the combined motif bed
         annmotifbed = self.new_task('annmotifbed', AnnBedFile, genome=self.genome)
-        annmotifbed.in_bed = makemotifbed.out_motif_bed
-        filtermotifbed = self.new_task('filtermotifbed', ApplyFilterBedFile, transcript_bed=self.transcript_bed )
-        filtermotifbed.in_filt_dat = annmotifbed.out_filt_dat
+        annmotifbed.in_bed = combinebed.out_bed
+        filterbed = self.new_task('filtermotifbed', ApplyFilterBedFile, transcript_bed=self.transcript_bed )
+        filterbed.in_filt_dat = annmotifbed.out_filt_dat
         
         """
         # make footprint
@@ -67,14 +92,7 @@ class MyWorkflow(sciluigi.WorkflowTask):
             makefootprint.in_bed = filtermotifbed.out_filt_bed
             makefootprintall[key] = makefootprint
         """
-        
-        # make a random bed
-        makerandombed = self.new_task('makerandombed', MakeRandomBed, regions=self.regions, window_size=len(self.consensus_seq), step_size=len(self.consensus_seq)*5, outdir=os.path.join(self.outdir, 'beds'))
-        annrandombed = self.new_task('annrandombed', AnnBedFile, genome=self.genome)
-        annrandombed.in_bed = makerandombed.out_bed
-        filterrandombed = self.new_task('filterrandombed', ApplyFilterBedFile, transcript_bed=self.transcript_bed )
-        filterrandombed.in_filt_dat = annrandombed.out_filt_dat
-        
+
         # get the bam file of the clip data
         processclipbams = {}
         findtotalreads = {}
@@ -84,7 +102,6 @@ class MyWorkflow(sciluigi.WorkflowTask):
              findtotalreads[key] = self.new_task('findtotalreads_%s'%key, FindTotalReads)
              findtotalreads[key].in_bam = processclipbams[key].out_bam
 
-        
         # make bed graph of each strand of clip data
         getbedgraphs = {}
         outdir_clips = os.path.join(self.outdir, 'clip', 'bedgraphs')
@@ -92,52 +109,48 @@ class MyWorkflow(sciluigi.WorkflowTask):
              getbedgraphs[key] = self.new_task('getbedgraphs_%s'%key, GetBedGraphFromBam, outdir=outdir_clips, genome_size=self.genome_size)
              getbedgraphs[key].in_bam = processclipbam.out_bam
 
-        motiftpmboth = {}
-        motifcountsboth = {}
-        sequenceboth = {}
-        secstructureboth = {}
-        for key_rand, bedfiletask in zip(['motif', 'random'], [filtermotifbed, filterrandombed]):
-            # split bed file into strands
-            splitbedfile = self.new_task('splitbedfile_%s'%key_rand, DividBedByStrand)
-            splitbedfile.in_bed_file = bedfiletask.out_filt_bed
-                
-            # go through bedgraph files and run all clip commands
-            outdir_clips = os.path.join(self.outdir, 'clip', 'strands')
-            combinestrandsall = {}
-            for key, getbedgraph in getbedgraphs.items():
-                # find signal in plus strand
-                clipsignalplus = self.new_task('getclipsignalplus_%s_%s'%(key_rand, key), GetClipSignal, window_size=self.window_size, genome_size=self.genome_size, outdir=outdir_clips)
-                clipsignalplus.in_bed_file = splitbedfile.out_bed_plus
-                clipsignalplus.in_bg_file = getbedgraph.out_bg_plus
-    
-                # find signal in minus strand
-                clipsignalminus = self.new_task('getclipsignalminus_%s_%s'%(key_rand, key), GetClipSignal, window_size=self.window_size, genome_size=self.genome_size, outdir=outdir_clips)
-                clipsignalminus.in_bed_file = splitbedfile.out_bed_minus
-                clipsignalminus.in_bg_file = getbedgraph.out_bg_minus
-                
-                # combine the two
-                combinestrands = self.new_task('combinestrands_%s_%s'%(key_rand, key), CombineStrandData, outdir=os.path.join(self.outdir, 'clip'))
-                combinestrands.in_datafiles = [clipsignalplus.out_signal, clipsignalminus.out_signal]
-                combinestrandsall[key] = combinestrands
-            motifcountsboth[key_rand] = combinestrandsall
+
+        # split bed file into strands
+        splitbedfile = self.new_task('splitbedfile', DividBedByStrand)
+        splitbedfile.in_bed_file = filterbed.out_filt_bed
             
-            # find the transcript count per motif site based on the annotated refseq gene and the rnaseq data
-            outdir_tpm = os.path.join(self.outdir, 'expression')
-            findmotiftpm = self.new_task('findmotiftpm_%s'%key_rand, ProcessRNASeq, rnaseq_file1=self.rnaseq_file1,
-                                         rnaseq_file2=self.rnaseq_file2, biomart_file=self.biomart_file, outdir=outdir_tpm)
-            findmotiftpm.in_bed = bedfiletask.out_filt_bed
-            motiftpmboth[key_rand] = findmotiftpm
+        # go through bedgraph files and run all clip commands
+        outdir_clips = os.path.join(self.outdir, 'clip', 'strands')
+        combinestrandsall = {}
+        for key, getbedgraph in getbedgraphs.items():
+            # find signal in plus strand
+            clipsignalplus = self.new_task('getclipsignalplus_%s'%(key), GetClipSignal, window_size=self.window_size, genome_size=self.genome_size, outdir=outdir_clips)
+            clipsignalplus.in_bed_file = splitbedfile.out_bed_plus
+            clipsignalplus.in_bg_file = getbedgraph.out_bg_plus
+
+            # find signal in minus strand
+            clipsignalminus = self.new_task('getclipsignalminus_%s'%(key), GetClipSignal, window_size=self.window_size, genome_size=self.genome_size, outdir=outdir_clips)
+            clipsignalminus.in_bed_file = splitbedfile.out_bed_minus
+            clipsignalminus.in_bg_file = getbedgraph.out_bg_minus
             
-            # find sequence of intervals
-            outdir_seq = os.path.join(self.outdir, 'sequences')
-            findsequence = self.new_task('findsequence_%s'%key_rand, FindSequence, genome_fasta=self.genome_fasta,
-                                         consensus_seq=self.consensus_seq, check_for_seq=self.consensus_seq[:4],
-                                         window_size=self.window_size, outdir=outdir_seq)
-            findsequence.in_bed = bedfiletask.out_filt_bed
-            find_seqdata = self.new_task('findseqdata_%s'%key_rand, FindMotifSequenceData, consensus_seq=self.consensus_seq, check_for_seq=self.consensus_seq[:4],
-                                         window_size=self.window_size, outdir=outdir_seq)
-            find_seqdata.in_fasta = findsequence.out_fasta
-            sequenceboth[key_rand] = find_seqdata
+            # combine the two
+            combinestrands = self.new_task('combinestrands_%s'%(key), CombineStrandData, outdir=os.path.join(self.outdir, 'clip'))
+            combinestrands.in_datafiles = [clipsignalplus.out_signal, clipsignalminus.out_signal]
+            combinestrandsall[key] = combinestrands
+
+        """
+        # find the transcript count per motif site based on the annotated refseq gene and the rnaseq data
+        outdir_tpm = os.path.join(self.outdir, 'expression')
+        findmotiftpm = self.new_task('findmotiftpm_%s'%key_rand, ProcessRNASeq, rnaseq_file1=self.rnaseq_file1,
+                                     rnaseq_file2=self.rnaseq_file2, biomart_file=self.biomart_file, outdir=outdir_tpm)
+        findmotiftpm.in_bed = filterbed.out_filt_bed
+        motiftpmboth[key_rand] = findmotiftpm
+        
+        # find sequence of intervals
+        outdir_seq = os.path.join(self.outdir, 'sequences')
+        findsequence = self.new_task('findsequence_%s'%key_rand, FindSequence, genome_fasta=self.genome_fasta,
+                                     consensus_seq=self.consensus_seq, check_for_seq=self.consensus_seq[:4],
+                                     window_size=self.window_size, outdir=outdir_seq)
+        findsequence.in_bed = filterbed.out_filt_bed
+        find_seqdata = self.new_task('findseqdata_%s'%key_rand, FindMotifSequenceData, consensus_seq=self.consensus_seq, check_for_seq=self.consensus_seq[:4],
+                                     window_size=self.window_size, outdir=outdir_seq)
+        find_seqdata.in_fasta = findsequence.out_fasta
+
         
         # find the secondary structure energy of the non-random areas
         secstructuremotif = {}
@@ -167,7 +180,7 @@ class MyWorkflow(sciluigi.WorkflowTask):
         combinedata.in_bed = filtermotifbed.out_filt_bed
         combinedata.in_bed_rand = filterrandombed.out_filt_bed
         combinedata.in_secstructure = {key:target.out_rnafold for key, target in secstructuremotif.items()}
-        """
+        ""
         # make plots
         makeplots = self.new_task('makeplots', MakePlots, outdir=os.path.join(self.outdir, 'plots'))
         makeplots.in_counts = {key:target.out_signal for key, target in motifcountsboth['motif'].items()}
@@ -176,13 +189,16 @@ class MyWorkflow(sciluigi.WorkflowTask):
         makeplots.in_signal_rand = {key:target.out_signal for key, target in motifsignalboth['random'].items()}
         makeplots.in_sequence = filtermotifbed.out_filt_bed
         makeplots.in_bed_rand = filterrandombed.out_filt_bed
-        """
+        ""
         
 
         #makeplots.in_signal = [target.out_signal for target in motifsignalboth['motif']]
         #makeplots.in_signal_rand = [target.out_signal for target in motifsignalboth['random'].values()]
         
-        return combinedata
+        #return combinedata
+        """
+        return combinestrandsall
+
 
 class DownloadRNAseq(sciluigi.Task):
     """Use wget to download RNA seq data."""
@@ -190,6 +206,7 @@ class DownloadRNAseq(sciluigi.Task):
     outdir = luigi.Parameter()
 
     # input
+
     # no inputs
     
     # outputs
@@ -197,12 +214,12 @@ class DownloadRNAseq(sciluigi.Task):
         return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'expression_data', 'rna_seq_rep1.dat'))
     
     def out_rna2(self):
-        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'expression_data', 'rna_seq_rep1.dat'))
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'expression_data', 'rna_seq_rep2.dat'))
     
     # run
     def run(self):
         # make out directory if it doesn't exist
-        dirname = os.path.dirname(self.out_homer_motif().path)
+        dirname = os.path.dirname(self.out_rna1().path)
         if not os.path.exists(dirname):
             os.makedirs(dirname)
             
@@ -214,56 +231,24 @@ class DownloadRNAseq(sciluigi.Task):
         subprocess.call('wget https://www.encodeproject.org/files/ENCFF471SEN/@@download/ENCFF471SEN.tsv', shell=True)
         subprocess.call('mv ENCFF471SEN.tsv %s'%self.out_rna2().path, shell=True)
 
-  
-class GetExpressedGenes(sciluigi.Task):
-    """Process RNA seq expression data and save transcripts with some expression"""
+
+class DownloadGencode(sciluigi.Task):
+    """Use wget to download RNA seq data."""
     # parameters
     outdir = luigi.Parameter()
 
     # input
-    in_rna1 = None
-    in_rna2 = None
+
+    # no inputs
     
     # outputs
-    def out_tpm(self):
-        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'expression_data', 'rna_seq_combined.tpm.above_0.01_both.dat'))
-    
-    # run
-    def run(self):
-        # make out directory if it doesn't exist
-        dirname = os.path.dirname(self.out_homer_motif().path)
-        if not os.path.exists(dirname):
-            os.makedirs(dirname)
-            
-        # load rep1 and rep2 of the RNA seq data
-        rep1 = pd.read_table(self.in_rna1().path)
-        rep2 = pd.read_table(self.in_rna2().path)
-        tpm = pd.concat([rep1.set_index('transcript_id').TPM.rename('rep1'),
-                         rep2.set_index('transcript_id').TPM.rename('rep2')], axis=1);
-        tpm.loc[(np.log10(tpm + 1E-3) > -2).all(axis=1)].to_csv(self.out_tpm().path, sep='\t')
-
-class FindExonicRegions(sciluigi.Task):
-    """Download the exons, st, merge. """
-    # parameters
-    outdir = luigi.Parameter()
-
-    # input
-    
     def out_annotations(self):
         return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'gencode.v24.primary_assembly.annotation.gtf.gz'))
 
-    def out_bed_unprocessed(self):
-        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'exons_unprocessed.bed'))
-
-    def out_bed_processed(self):
-        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'exons_processed.bed'))
-
-    def out_bed_merged(self):
-        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'exons_processed.bed'))
-    
+    # run
     def run(self):
         # make out directory if it doesn't exist
-        dirname = os.path.dirname(self.out_annotations().path)
+        dirname = os.path.dirname(self.out_rna1().path)
         if not os.path.exists(dirname):
             os.makedirs(dirname)
             
@@ -273,9 +258,66 @@ class FindExonicRegions(sciluigi.Task):
         subprocess.call(task1, shell=True)
         subprocess.call('mv gencode.v24.primary_assembly.annotation.gtf.gz %s'%self.out_annotations().path, shell=True)
         
+  
+class GetExpressedGenes(sciluigi.Task):
+    """Process RNA seq expression data and save transcripts with some expression"""
+    # parameters
+    outdir = luigi.Parameter()
+    tpm_cutoff = luigi.FloatParameter()
+    
+    # input
+    in_rna1 = None
+    in_rna2 = None
+    
+    # outputs
+    def out_tpm(self):
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'expression_data', 'transcripts_tpm_%.2f.dat'%self.tpm_cutoff))
+    
+    # run
+    def run(self):
+        # make out directory if it doesn't exist
+        dirname = os.path.dirname(self.out_tpm().path)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname)
+            
+        # load rep1 and rep2 of the RNA seq data
+        rep1 = pd.read_table(self.in_rna1().path)
+        rep2 = pd.read_table(self.in_rna2().path)
+        tpm = pd.concat([rep1.set_index('transcript_id').TPM.rename('rep1'),
+                         rep2.set_index('transcript_id').TPM.rename('rep2')], axis=1);
+        eps = self.tpm_cutoff/10.
+        tpm.loc[(np.log10(tpm + eps) > np.log10(self.tpm_cutoff)).all(axis=1)].to_csv(self.out_tpm().path, sep='\t')
+
+class FindExonicRegions(sciluigi.Task):
+    """Download the exons, st, merge. """
+    # parameters
+    outdir = luigi.Parameter()
+
+    # input
+    
+
+    def out_bed_unprocessed(self):
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'exons_unprocessed.bed'))
+
+    def out_bed_processed(self):
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'exons_processed.bed'))
+    
+    def out_bed_sorted(self):
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'exons_processed_st.bed'))
+
+    def out_bed(self):
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'exons_processed_st_merged.bed'))
+    
+    def run(self):
+        # make out directory if it doesn't exist
+        dirname = os.path.dirname(self.out_annotations().path)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname)
+            
+
         # process to save exons
-        task2 = ('gunzip -c gencode.v24.primary_assembly.annotation.gtf.gz | awk \'{if ($3=="exon") print}\' | '
-                 'awk \'{OFS="\\t"}{n=split($0, a, "\\t"); print $1, $4-1, $5, $3"_"(NR-1), $6, $7, a[n] }\' > %s'%self.out_bed_unprocessed().path)
+        task2 = ('gunzip -c %s | awk \'{if ($3=="exon") print}\' | '
+                 'awk \'{OFS="\\t"}{n=split($0, a, "\\t"); print $1, $4-1, $5, $3"_"(NR-1), $6, $7, a[n] }\' > %s')%(self.out_annotations().path, self.out_bed_unprocessed().path)
         log.info(task2)
         subprocess.call(task2, shell=True)
         
@@ -287,7 +329,7 @@ class FindExonicRegions(sciluigi.Task):
         log.info('processing annotation lines')
         line_dict = {}
         for i, line in enumerate(lines):
-            line_series = pd.Series(line.split('\t')[:-1], index=bedFields)
+            line_series = pd.Series(line.split('\t')[:-1], index=variables.bed_fields)
             line_annots = pd.Series({val.split()[0]:val.split()[1].replace('"', '') for val in line.split('\t')[-1].strip('\n;').split('; ')})
             line_dict[i] = pd.concat([line_series, line_annots])
         
@@ -297,18 +339,98 @@ class FindExonicRegions(sciluigi.Task):
         
         # reorder columns
         cols = line_table.columns.tolist()
-        cols_ordered = bedFields + [col for col in cols if col not in bedFields]
-        line_table = line_table.loc[:, cols_ordered]
+        cols_ordered = variables.bed_fields + [col for col in cols if col not in variables.bed_fields]
+        line_table = (line_table.loc[:, cols_ordered].sort_values(['chrm', 'start', 'stop'])).copy()
         
         # save output with fields prepended by comment for use in bed
         line_table.columns = ['#'+col if i==0 else col for i, col in enumerate(cols_ordered)]
-        line_table.sort_values(['chrm', 'start', 'end']).to_csv(self.out_bed_processed().path, sep='\t', index=False)
+        line_table.to_csv(self.out_bed_processed().path, sep='\t', index=False)
         
         # merge bed file
-        task3 = 'bedtools merge -i %s -c 10 -o distinct > %s'%(self.out_bed_processed().path, self.out_bed_merged().path)
+        task3 = 'bedtools sort -i %s > %s'%(self.out_bed_processed().path, self.out_bed_sorted().path)
         log.info(task3)
-        subprocess.call(task3, shell=True)        
+        subprocess.call(task3, shell=True)
+        
+        task4 = 'bedtools merge -i %s -c 20 -o distinct |  awk \'BEGIN {print "%s"} {print}\'> %s'%(self.out_bed_sorted().path, '#' + '\\t'.join(variables.bed_fields), self.out_bed().path)
+        log.info(task4)
+        subprocess.call(task4, shell=True)        
+
+class FindTranscribedRegions(sciluigi.Task):
+    """Download the exons, st, merge. """
+    # parameters
+    outdir = luigi.Parameter()
+
+    # input
+    in_annotations = None
+
+    def out_bed_unprocessed(self):
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'all_unprocessed.bed'))
     
+    def out_bed_sorted(self):
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'all_unprocessed_st.bed'))
+
+    def out_bed(self):
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'annotations', 'all_unprocessed_st_merged.bed'))
+    
+    def run(self):
+        # make out directory if it doesn't exist
+        dirname = os.path.dirname(self.out_bed().path)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname)
+            
+        # process to save exons
+        task2 = ('gunzip -c %s | awk \'{if (substr($1, 1, 3)=="chr") print}\' | '
+                 'awk \'{OFS="\\t"}{n=split($0, a, "\\t"); print $1, $4-1, $5, $3"_"(NR-1), $6, $7, a[n] }\' > %s')%(self.in_annotations().path, self.out_bed_unprocessed().path)
+        log.info(task2)
+        subprocess.call(task2, shell=True)
+        
+        # merge bed file
+        task3 = 'bedtools sort -i %s > %s'%(self.out_bed_unprocessed().path, self.out_bed_sorted().path)
+        log.info(task3)
+        subprocess.call(task3, shell=True)
+        
+        task4 = 'bedtools merge -i %s -c 4 -o first |  awk \'BEGIN {print "%s"} {print}\'> %s'%(self.out_bed_sorted().path, '#' + '\\t'.join(variables.bed_fields), self.out_bed().path)
+        log.info(task4)
+        subprocess.call(task4, shell=True)   
+
+
+class FindExpressedRegions(sciluigi.Task):
+    """Download the exons, st, merge. """
+    # parameters
+    outdir = luigi.Parameter()
+
+    # input
+    in_bed = None
+    in_tpm = None
+    
+    def out_bed(self):
+        basename2 = os.path.splitext(os.path.basename(self.in_tpm().path))[0]
+        basename = os.path.splitext(os.path.basename(self.in_bed().path))[0]
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, basename + '_' + basename2 + '.bed'))
+
+
+    
+    def run(self):
+        # make out directory if it doesn't exist
+        dirname = os.path.dirname(self.out_bed().path)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname)
+        
+        # load merged exonic regions
+        regions = processing.load_bed(self.in_bed().path)
+        regions.rename(columns={'name':'transcript_ids'}, inplace=True);
+        regions.loc[:, 'name'] = ['exon_%d'%i for i in range(len(regions))];
+        names = regions.transcript_ids.str.split(',', expand=True).replace([None], np.nan);
+        
+        # load transcripts with tpm > cutoff
+        a = pd.read_table(self.in_tpm().path, index_col=0);
+        
+        # find those regions with transcript ids in a
+        names_match = pd.concat({col:pd.Series(np.in1d(names.loc[:, col].dropna(), a.index.tolist()), index=names.loc[:, col].dropna().index) for col in names}, axis=1);
+        subset = names_match.fillna(False).any(axis=1);
+        cols_ordered = variables.bed_fields + ['transcript_ids'];
+        sub_bed = regions.loc[subset, cols_ordered]
+        processing.save_bed(sub_bed.fillna('.'), self.out_bed().path)
 
 class MakeHomerMotif(sciluigi.Task):
     """Make a motif using HOMER and consensus seq."""
@@ -333,29 +455,39 @@ class MakeHomerMotif(sciluigi.Task):
         task_call = 'seq2profile.pl %s %d %s > %s'%(self.seq, self.num_muts,  self.motif_name, self.out_homer_motif().path)
         subprocess.call(task_call, shell=True)
         
-class MakeBedFile(sciluigi.Task):
+class MakeBedFileHomer(sciluigi.Task):
     """Make a bed file of motif sites using HOMER."""
     # parameters
     genome = luigi.Parameter()
-    regions = luigi.Parameter()
+    outdir = luigi.Parameter()
     
     # input
     in_homer_motif = None
+    in_regions = None
     
     # outputs
-    def out_motif_bed(self):
-        outdir = os.path.dirname(self.in_homer_motif().path).replace('motifs', 'beds')
-        basename = os.path.splitext(os.path.basename(self.in_homer_motif().path))[0]
-        return sciluigi.TargetInfo(self, os.path.join(outdir, '%s.bed'%(basename)))
+    def out_bed(self):
+        basename1 = os.path.splitext(os.path.basename(self.in_regions().path))[0]
+        basename2 = os.path.splitext(os.path.basename(self.in_homer_motif().path))[0]
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, '%s.%s.bed'%(basename1, basename2)))
     
     # run
     def run(self):
         # make out directory if it doesn't exist
-        dirname = os.path.dirname(self.out_motif_bed().path)
+        dirname = os.path.dirname(self.out_bed().path)
         if not os.path.exists(dirname):
             os.makedirs(dirname)
-        task_call = 'annotatePeaks.pl %s %s -m %s -mbed %s -noann -nogene > /dev/null'%(self.regions, self.genome, self.in_homer_motif().path, self.out_motif_bed().path)
+            
+        # find the motif
+        output1 = self.out_bed().path + '.tmp'
+        task_call = 'annotatePeaks.pl %s %s -m %s -mbed %s -noann -nogene > /dev/null'%(self.in_regions().path, self.genome, self.in_homer_motif().path, output1)
         subprocess.call(task_call, shell=True)
+        
+        # take out trackline and sort
+        output2 = self.out_bed().path 
+        sort_call = 'tail -n+2 %s | bedtools sort -i stdin | awk \'BEGIN {print "%s"} {OFS="\t"}{center=int(($2+$3)*0.5); print $1, center, center+1, $4 "_"NR-1, $5, $6}\' > %s'%(output1, '#' + '\\t'.join(variables.bed_fields), output2)
+        subprocess.call(sort_call, shell=True)
+        
 
 class AnnBedFile(sciluigi.Task):
     """Filter the bed output from HOMER for strandedness, protein-coding, etc."""
@@ -372,18 +504,14 @@ class AnnBedFile(sciluigi.Task):
         return sciluigi.TargetInfo(self, os.path.join(outdir, '%s.ann.dat'%(basename)))    
     # run
     def run(self):
-        interfile_basename = os.path.splitext(self.in_bed().path)[0]
-        sortfile = interfile_basename + '.st.bed.tmp'
+        bedfile = self.in_bed().path
         annfile = self.out_filt_dat().path
         
         # filter
-        sort_call = 'tail -n+2 %s | bedtools sort -i stdin > %s'%(self.in_bed().path, sortfile)
-        annotate_call = 'annotatePeaks.pl %s %s > %s'%(sortfile, self.genome, annfile)
+        annotate_call = 'annotatePeaks.pl %s %s > %s'%(bedfile, self.genome, annfile)
 
         # do calls
-        subprocess.call(sort_call, shell=True)
         subprocess.call(annotate_call, shell=True)
-        subprocess.call('rm %s'%sortfile, shell=True)
 
 
 class ApplyFilterBedFile(sciluigi.Task):
@@ -422,40 +550,52 @@ class ApplyFilterBedFile(sciluigi.Task):
 class MakeRandomBed(sciluigi.Task):
     """Make bed file of intervals within regions of a certain length."""
     # parameters
-    window_size = luigi.IntParameter()
-    step_size = luigi.IntParameter()
-    region_interval = luigi.IntParameter(default=1)
-    regions = luigi.Parameter()
-    final_num = luigi.IntParameter(default=1000000)
+    num_random = luigi.IntParameter()
     outdir = luigi.Parameter()
+    
+    in_regions = None
     
     # output
     def out_bed(self):
-        return sciluigi.TargetInfo(self, os.path.join(self.outdir, 'random.%dmer.bed'%self.window_size))
+        basename1 = os.path.splitext(os.path.basename(self.in_regions().path))[0]
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, '%s.random_%.0e.bed'%(basename1, self.num_random)))
     
     # run
     def run(self):
-        tmp_bed_file = self.out_bed().path + '.tmp'
-        make_windows_call = 'awk \'{if (NR%%%d==0) print}\' %s | bedtools makewindows -b stdin -w %d -s %d -i srcwinnum > %s'%(self.region_interval, self.regions, self.window_size, self.step_size, tmp_bed_file)
-        subprocess.call(make_windows_call, shell=True)
+
+        # make out directory if it doesn't exist
+        dirname = os.path.dirname(self.out_bed().path)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname)
+            
+        # load regions
+        regions = processing.load_bed(self.in_regions().path)        
+        regions.loc[:, 'int_size'] = regions.stop - regions.start
+        regions.loc[:, 'cum_int_size'] = np.cumsum(regions.int_size)
         
-        # total lines
-        total_num = int(subprocess.check_output('cat %s | wc -l'%tmp_bed_file, shell=True).strip())
-        
-        # load chunks and subsample randomly
-        reader = pd.read_table(tmp_bed_file, chunksize=self.final_num, header=None, names=variables.bed_fields)
-        final_df = []
-        for chunk in reader:
-            # choose total_num/final_num of the entries
-            num_to_choose = int(self.final_num/float(total_num/len(chunk)))
-            index = np.random.choice(chunk.index.tolist(), size=num_to_choose, replace=False)
-            final_df.append(chunk.loc[index])
-        
-        # save to final
-        final_df = pd.concat(final_df).sort_values(['chrm', 'start', 'stop'])
-        final_df.loc[:, 'strand'] = np.random.choice(['-', '+'], size=len(final_df))
-        final_df.to_csv(self.out_bed().path, sep='\t', index=False, header=False)
-        subprocess.call('rm %s'%tmp_bed_file, shell=True)
+        # find n start sites
+        n = self.num_random
+        np.random.seed(0)
+        vals = np.sort(np.random.choice(np.arange(regions.int_size.sum()), size=n))
+        locations = np.searchsorted(regions.cum_int_size, vals)
+        strands = np.random.choice(['+', '-'], size=n)
+
+        # go through each location and get the interval
+        new_regions = []
+        for i, (loc, val) in enumerate(zip(locations, vals)):
+            region = regions.iloc[loc]
+            diff = region.cum_int_size - val
+            new_start = region.start + diff 
+            new_stop = new_start + 1
+            new_region = pd.Series({'chrm':region.chrm,
+                                    'start':new_start,
+                                    'stop':new_stop,
+                                    'name':'%s_%d'%(region.loc['name'], i),
+                                    'strand':strands[i],
+                                    'score':region.score})
+            new_regions.append(new_region)
+        new_regions = pd.concat(new_regions, axis=1).transpose().loc[:, variables.bed_fields]
+        processing.save_bed(new_regions, self.out_bed().path)
         
 
 class DividBedByStrand(sciluigi.Task):
@@ -596,7 +736,7 @@ class GetClipSignal(sciluigi.Task):
 
         basename = os.path.splitext(os.path.basename(self.in_bed_file().path))[0]
         basename2 = os.path.splitext(os.path.basename(self.in_bg_file().path))[0]
-        return sciluigi.TargetInfo(self, os.path.join(self.outdir, '%s.%s.tracks.pkl'%(basename, basename2)))
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, '%s.%s.%d.tracks.pkl'%(basename, basename2, self.window_size)))
                                    
     def run(self):
         # make directory if it doesn't exist
