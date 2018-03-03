@@ -69,6 +69,24 @@ def combine_filenames(filenames):
     
     return basenames_filtered
 
+def combine_filenames_split(filenames, avoid_elements=['ann', 'filt', 'bedGraph', 'tracks', 'txt', 'gz', 'counts', 'pkl']):
+    """Combine a set of filenames, removing any duplicate elements separated by periods"""
+
+    name_list = list(itertools.chain(*[os.path.basename(filename).split('.') for filename in filenames]))
+    _, idx = np.unique(name_list, return_index=True)
+    name_unique = [name_list[i] for i in np.sort(idx)]
+    basename = '.'.join([s for s in name_unique if s not in avoid_elements])
+
+    return basename
+
+def load_motif(filename):
+    """Load a homer motif"""
+    with open(filename) as f:
+        lines = f.read_lines()
+    
+    header = lines[0][1:].split()
+    
+
 def process_go_term_gene_string(s):
     """Process the go term gene string."""
     snew = s.strip(']"').lstrip('"[')[:]
