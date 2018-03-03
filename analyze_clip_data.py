@@ -9,7 +9,7 @@ import numpy as np
 import ipdb
 import matplotlib.pyplot as plt
 import seaborn as sns
-from puflibs import variables, processing, scltasks
+from puflibs import variables, processing, scltasks, seqmodel
 
 log = logging.getLogger('sciluigi-interface')
 
@@ -26,6 +26,8 @@ class MyWorkflow(sciluigi.WorkflowTask):
     input_bam = luigi.Parameter(default='CLIP/hPUM2/bams/input.ENCFF786ZZB.bam')
     rep1_bam = luigi.Parameter(default='CLIP/hPUM2/bams/rep1.ENCFF231WHF.bam')
     rep2_bam = luigi.Parameter(default='CLIP/hPUM2/bams/rep2.ENCFF732EQX.bam')
+    rep1_peaks = luigi.Parameter(default='CLIP/hPUM2/peaks/ENCFF372VPV.rep1.st.bed')
+    rep2_peaks = luigi.Parameter(default='CLIP/hPUM2/peaks/ENCFF141SVY.rep2.st.bed')
     
     # CLIP processing inputs
     len_consensus_seq = luigi.IntParameter(default=11)
@@ -34,26 +36,30 @@ class MyWorkflow(sciluigi.WorkflowTask):
     num_muts = luigi.IntParameter(default=1)
     window_size = luigi.IntParameter(default=500)
     temperature = luigi.IntParameter(default=0)
-    num_random = luigi.IntParameter(default=1000000)
+    num_random = luigi.IntParameter(default=5000000)
     randomseed = luigi.FloatParameter(default=np.nan)
     
     # sec structure processing inputs
     ss_window_size = luigi.IntParameter(default=100)
     
+    # RNAMap input data
+    model_param_basename = luigi.Parameter(default='annotations/RNAmap/qMotif_table_05_012318_1_')
+    
     # transcript data
     tpm_cutoff = luigi.FloatParameter(default = 0.01)
-    tpm_file = luigi.Parameter(default='RNAseq/transcript_quant/rna_seq_combined.tpm.above_0.01_both.dat')
-    rnaseq_file1 = luigi.Parameter(default='RNAseq/transcript_quant/ENCFF272HJP.rep1.tsv')
-    rnaseq_file2 = luigi.Parameter(default='RNAseq/transcript_quant/ENCFF471SEN.rep2.tsv')
-    regions = luigi.Parameter(default='RNAseq/transcript_quant/exons.st.merge_transcript.above_0.01_both.bed') # the regions in which to look for motifs
+    #tpm_file = luigi.Parameter(default='RNAseq/transcript_quant/rna_seq_combined.tpm.above_0.01_both.dat')
+    #rnaseq_file1 = luigi.Parameter(default='RNAseq/transcript_quant/ENCFF272HJP.rep1.tsv')
+    #rnaseq_file2 = luigi.Parameter(default='RNAseq/transcript_quant/ENCFF471SEN.rep2.tsv')
+    #regions = luigi.Parameter(default='RNAseq/transcript_quant/exons.st.merge_transcript.above_0.01_both.bed') # the regions in which to look for motifs
     transcript_bed = luigi.Parameter(default='annotations/refseq/hg38_refGene.transcripts.st.bed')
     biomart_file = luigi.Parameter(default='annotations/ensemble_gene_converter_biomart.txt')
     
     def workflow(self):
         ####### CLIP ########
         # download CLIP data
+        # TODO
         
-        # process CLIP data
+        # process CLIP data bams
         # get the bam file of the clip data
         processclipbams = {}
         findtotalreads = {}
@@ -69,6 +75,9 @@ class MyWorkflow(sciluigi.WorkflowTask):
         for key, processclipbam in processclipbams.items():
              getbedgraphs[key] = self.new_task('getbedgraphs_%s'%key, GetBedGraphFromBam, outdir=outdir_clips, genome_size=self.genome_size)
              getbedgraphs[key].in_bam = processclipbam.out_bam
+        
+        # process CLIP data peaks
+        processclipbeds = self.new_task('processclipbeds%s'%key, ProcessClipPeaks, outdir=os.path.join(self.outdir, 'beds'), bedfile1=self.rep1_peaks, bedfile2=self.rep2_peaks)
         
         ####### FIND REGIONS ########
         # load RNA seq data
@@ -93,29 +102,38 @@ class MyWorkflow(sciluigi.WorkflowTask):
         dividebedrandom.in_bed = makerandombed.out_bed
         
         combinedataall = {}
-        
+        filterbedall = {}
+        ####### FIND MOTIFS IN REGIONS ########
         # iterate over all the region beds
         num_iter = 10
-        for i in range(num_iter):
-
-            ####### FIND MOTIFS IN REGIONS ########
+        iter_values = range(num_iter+1)
+        iter_values = [9,10]
+        for i in iter_values:
+            # normal workflow, i = 1:10:
+            if i < num_iter:
+                # make motif bed
+                makemotifbed = self.new_task('makemotifbed_%d'%i, MakeBedFileHomer, genome=self.genome, seq_length=self.len_consensus_seq, outdir=os.path.join(self.outdir, 'beds/split/%d'%i), motif=self.motif_file)
+                makemotifbed.in_regions = getattr(divideregions, 'out_bed%d'%i)
+                    
+                # combine motif and random bed, annotate, and filter
+                combinebed = self.new_task('combinebeds_%d'%i, scltasks.CombineBeds, outdir=os.path.join(self.outdir, 'beds/split/%d'%i))
+                combinebed.in_beds = [makemotifbed.out_bed, getattr(dividebedrandom, 'out_bed%d'%i)]
+                filter_genetype = True
             
-            # make motif bed
-            makemotifbed = self.new_task('makemotifbed_%d'%i, MakeBedFileHomer, genome=self.genome, outdir=os.path.join(self.outdir, 'beds/split/%d'%i), motif=self.motif_file)
-            makemotifbed.in_regions = getattr(divideregions, 'out_bed%d'%i)
+            elif i == num_iter:
+                ###### APPEND THE CLIP PEAKS ######
+                makemotifbed = self.new_task('makemotifbed_%d'%i, MakeBedFileHomer, genome=self.genome, seq_length=self.len_consensus_seq, outdir=os.path.join(self.outdir, 'beds/split/%d'%i), motif=self.motif_file)
+                makemotifbed.in_regions = processclipbeds.out_bed ### CLIP PEAK REGIONS
+                combinebed = makemotifbed
+                filter_genetype = False
                 
-            # combine motif and random bed, annotate, and filter
-            combinebed = self.new_task('combinebeds_%d'%i, scltasks.CombineBeds, outdir=os.path.join(self.outdir, 'beds/split/%d'%i))
-            combinebed.in_beds = [makemotifbed.out_bed, getattr(dividebedrandom, 'out_bed%d'%i)]
-        
-            # annotate and filter the combined motif bed
+            # annotate and filter the clip peak motif bed
             annmotifbed = self.new_task('annmotifbed_%d'%i, AnnBedFile, genome=self.genome)
             annmotifbed.in_bed = combinebed.out_bed
-            filterbed = self.new_task('filtermotifbed_%d'%i, ApplyFilterBedFile, transcript_bed=self.transcript_bed )
-            filterbed.in_filt_dat = annmotifbed.out_filt_dat
-            
-            ####### FIND CLIP SIGNAL AT MOTIFS ########
-            
+            filterbed = self.new_task('filtermotifbed_%d'%i, ApplyFilterBedFile, transcript_bed=self.transcript_bed, filter_genetype=filter_genetype )
+            filterbed.in_filt_dat = annmotifbed.out_filt_dat               
+            filterbedall[i] = filterbed
+
             # split bed file into strands
             splitbedfile = self.new_task('splitbedfile_%d'%i, DividBedByStrand)
             splitbedfile.in_bed_file = filterbed.out_filt_bed
@@ -143,7 +161,7 @@ class MyWorkflow(sciluigi.WorkflowTask):
     
             # find the transcript count per motif site based on the annotated refseq gene and the rnaseq data
             outdir_tpm = os.path.join(self.outdir, 'expression', 'split_%d'%i)
-            findmotiftpm = self.new_task('findmotiftpm', ProcessRNASeq, biomart_file=self.biomart_file, outdir=outdir_tpm)
+            findmotiftpm = self.new_task('findmotiftpm_%d'%i, ProcessRNASeq, biomart_file=self.biomart_file, outdir=outdir_tpm)
             findmotiftpm.in_bed = filterbed.out_filt_bed
             findmotiftpm.in_rna1 = downloadrna.out_rna1
             findmotiftpm.in_rna2 = downloadrna.out_rna2
@@ -152,13 +170,19 @@ class MyWorkflow(sciluigi.WorkflowTask):
     
             # find sequence of intervals
             outdir_seq = os.path.join(self.outdir, 'sequences', 'split_%d'%i)
-            findsequence = self.new_task('findsequence', FindSequence, genome_fasta=self.genome_fasta,
+            findsequence = self.new_task('findsequence_%d'%i, FindSequence, genome_fasta=self.genome_fasta,
                                          window_size=self.window_size, outdir=outdir_seq)
             findsequence.in_bed = filterbed.out_filt_bed
             
             find_seqdata = self.new_task('findseqdata_%d'%i, FindMotifSequenceData, seq_length=self.len_consensus_seq, check_for_seq=self.check_for_seq,
                                          window_size=self.window_size, outdir=outdir_seq)
             find_seqdata.in_fasta = findsequence.out_fasta
+            
+            ####### PREDICT EFFECTS AT MOTIF SITES #######
+            outdir_model = os.path.join(self.outdir, 'effects', 'temp_%d'%(self.temperature), 'split_%d'%i)
+            find_effect = self.new_task('findeffect_%d'%i, FindPredictedSeqEffect, outdir=outdir_model, model_param_basename=self.model_param_basename,
+                                        temperature=self.temperature)
+            find_effect.in_seqdata = find_seqdata.out_seqdata   
 
             ####### FIND SECONDARY STRUCTURE AT MOTIF SITES ########
         
@@ -183,10 +207,14 @@ class MyWorkflow(sciluigi.WorkflowTask):
             combinedata.in_seq = find_seqdata.out_seqdata
             combinedata.in_tpm = findmotiftpm.out_motif_tpm
             combinedata.in_bed = filterbed.out_filt_bed
+            combinedata.in_effect = find_effect.out_seqdata
             combinedata.in_secstructure = {key:target.out_rnafold for key, target in findssenergy.items()}
             combinedataall[i] = combinedata
+        
+        combinesplits = self.new_task('combinesplits', CombineSplitData, outdir = os.path.join(self.outdir, 'output'))
+        combinesplits.in_data = {key:target.out_table for key, target in combinedataall.items()}
+        return combinesplits
 
-        return combinedataall.values()
 
 
 
@@ -238,7 +266,7 @@ class DownloadGencode(sciluigi.Task):
     # run
     def run(self):
         # make out directory if it doesn't exist
-        dirname = os.path.dirname(self.out_rna1().path)
+        dirname = self.outdir
         if not os.path.exists(dirname):
             os.makedirs(dirname)
             
@@ -247,6 +275,7 @@ class DownloadGencode(sciluigi.Task):
         log.info(task1)
         subprocess.call(task1, shell=True)
         subprocess.call('mv gencode.v24.primary_assembly.annotation.gtf.gz %s'%self.out_annotations().path, shell=True)
+
 
 class FindTranscribedRegions(sciluigi.Task):
     """Download the exons, st, merge. """
@@ -293,6 +322,7 @@ class MakeHomerMotif(sciluigi.Task):
     num_muts = luigi.IntParameter()
     outdir = luigi.Parameter()
     motif_name = luigi.Parameter()
+    
     # input
     # no inputs
     
@@ -315,6 +345,8 @@ class MakeBedFileHomer(sciluigi.Task):
     genome = luigi.Parameter()
     outdir = luigi.Parameter()
     motif = luigi.Parameter()
+    seq_length = luigi.IntParameter()
+    
     # input
     #in_homer_motif = None
     in_regions = None
@@ -338,11 +370,28 @@ class MakeBedFileHomer(sciluigi.Task):
         log.info(task_call)
         subprocess.call(task_call, shell=True)
         
-        # take out trackline and sort
-        output2 = self.out_bed().path 
-        sort_call = 'tail -n+2 %s | bedtools sort -i stdin | awk \'{OFS="\t"}{print $1, $2, $3, $4 "_"NR-1, $5, $6}\' > %s'%(output1, output2)
+        # take out trackline and sort 
+        output2 = self.out_bed().path + '.st.tmp'
+        sort_call = ('tail -n+2 %s | bedtools sort -i stdin | '
+                     'bedtools merge -s -d -%d -c 4,5 -o last,min -s -i stdin | '
+                     'awk \'{OFS="\\t"}{print $1, $2, $3, $5 "_"NR-1, $6, $4}\' > %s')%(output1, self.seq_length, output2)
         log.info(sort_call)
         subprocess.call(sort_call, shell=True)
+        
+        # make sure its the same strand as the parent bed file, if strand info is given.
+        output3 = self.out_bed().path 
+        strand_call =  ('bedtools closest -d -a %s -b %s | '
+                        'awk -F "\\t" \'{OFS="\\t"}{'
+                        'distance=$NF; '
+                        'motifstrand=$6; '
+                        'peakstrand=$(NF-1); '
+                        'if (peakstrand=="+" || peakstrand == "-") {if (peakstrand==motifstrand) print} '
+                        'else print}\' | cut -f 1-6 > %s')%(output2, self.in_regions().path, output3)
+        log.info(strand_call)
+        subprocess.call(strand_call, shell=True)
+        
+        # load bed and make sure only unique sites are reported
+
         
 
 class AnnBedFile(sciluigi.Task):
@@ -374,6 +423,7 @@ class ApplyFilterBedFile(sciluigi.Task):
     """Filter the bed output from HOMER for strandedness, protein-coding, etc."""
     # parameters
     transcript_bed = luigi.Parameter()
+    filter_genetype = luigi.BoolParameter(default=True)
     # inputs
     in_filt_dat = None
     
@@ -389,22 +439,53 @@ class ApplyFilterBedFile(sciluigi.Task):
         filtfile = interfile_basename + '.filt.bed.tmp'
         
         # filter
-        filter_call = ('tail -n+2 %s | '
-                       'awk \'BEGIN {FS="\\t"}{OFS="\\t"}{n=index($8, " ("); ann=substr($8, 1, n-1); notann=substr($8, n+2, length($8)-n-2); m=index(notann, ","); gene=substr(notann, 1, m-1); exon=substr(notann, m+2, length(notann)); '
-                        'if ($NF=="protein-coding" &&(ann=="exon" || index(ann, "UTR")==4))  print $2, $3-1, $4, $1, $6, $5, ann, gene, exon}\' | '
-                        'grep -v chrUn | grep -v random | bedtools sort -i stdin > %s')%(annfile, filtfile)
+        process_annotations = ('awk \'BEGIN {FS="\\t"}{OFS="\\t"}{'
+                       'if ($NF=="") {gene_type="NA"} else {gene_type=$NF}; '
+                       'n=index($8, " ("); '
+                       'if (n>0) {ann=substr($8, 1, n-1); notann=substr($8, n+2, length($8)-n-2);} '
+                       'else {ann=$8; notann=""}; '
+                       'm=index(notann, ","); '
+                       'if (m>0) {gene=substr(notann, 1, m-1); exon=substr(notann, m+2, length(notann));} '
+                       'else {gene=notann; exon=""}; '
+                       'print $2, $3-1, $4, $1, $6, $5, ann, gene, exon, gene_type}\'')
+        
+        # only include protein coding genes or the NORAD subset
+        #apply_filter = ('awk \'BEGIN {FS="\\t"}{OFS="\\t"}{'
+        #                 'if (($NF=="protein-coding" &&($7=="exon" || index($7, "UTR")==4)) || ($NF=="ncRNA" && $8=="%s")) print}\'')%self.nc_gene
+        if self.filter_genetype:
+            apply_filter = ('awk \'BEGIN {FS="\\t"}{OFS="\\t"}{'
+                             'if (($NF=="protein-coding" &&($7=="exon" || index($7, "UTR")==4)) || '
+                                 '($NF=="ncRNA" && $7=="non-coding")) print}\'')
+            filter_call_sub = process_annotations + ' | ' + apply_filter
+        else:
+            filter_call_sub = process_annotations
+                         
+                         
+        # process and apply filter
+        filter_call = ('tail -n+2 %s | ' + filter_call_sub +
+                       ' | grep -v chrUn | grep -v random | bedtools sort -i stdin > %s')%(annfile, filtfile)
+        
+        log.info(filter_call)
+        subprocess.call(filter_call, shell=True)
+        
         
         # find closest transcript and only keep that which aligns
-        strand_call = (('bedtools closest -d -a %s -b %s | awk -F "\\t" \'{OFS="\\t"}{if (($8==$13) && ($6==$15)) print}\' | '
-                       'cut -f 1-9 | awk \'{print}\'> %s')%
+        strand_call = (('bedtools closest -d -a %s -b %s | '
+                        'awk -F "\\t" \'{OFS="\\t"}{'
+                        'distance=$NF; '
+                        'genemotif=$8; '
+                        'geneclosest=$14; '
+                        'strandmotif=$6; '
+                        'strandgene=$16; '
+                        'if ((genemotif==geneclosest && strandmotif==strandgene) || genemotif=="") print}\' | '
+                       'cut -f 1-10 | awk \'{print}\'> %s')%
             (filtfile, self.transcript_bed, self.out_filt_bed().path))
         
         # do calls
-        log.info(filter_call)
-        subprocess.call(filter_call, shell=True)
+
         log.info(strand_call)
         subprocess.call(strand_call, shell=True)
-        subprocess.call('rm %s'%filtfile, shell=True)
+        #subprocess.call('rm %s'%filtfile, shell=True)
         
 class MakeRandomBed(sciluigi.Task):
     """Make bed file of intervals within regions of a certain length."""
@@ -508,6 +589,31 @@ class MakeFootprint(sciluigi.Task):
         call = 'pyatac vplot --bed %s --bam %s --not_atac --out %s --cores %d'%(self.in_bed().path, self.bamfile, outname, self.cores)
         subprocess.call(call, shell=True)
 
+class ProcessClipPeaks(sciluigi.Task):
+    """Given the two peak calls from ENCODE, processs to get a single combined file."""
+    # inputs
+    outdir = luigi.Parameter()
+    bedfile1 = luigi.Parameter()
+    bedfile2 = luigi.Parameter()
+    
+    def out_bed(self, ):
+        filenames = [self.bedfile1, self.bedfile2]
+        outname = processing.combine_filenames_split(filenames, avoid_elements=['st', 'bed']) + '.bed'
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, outname))
+    
+    def run(self, ):
+        if not os.path.exists(self.outdir):
+            os.makedirs(self.outdir)
+        
+        # combine beds, sort and merge
+        call = ('cat %s %s | '
+                'bedtools sort -i stdin | '
+                'bedtools merge -s -c 4,8 -o distinct,max -i stdin | '
+                'awk \'{OFS="\\t"}{print $1, $2, $3, $5, $6, $4}\' > %s')%(self.bedfile1, self.bedfile2, self.out_bed().path)
+        log.info(call)
+        subprocess.call(call, shell=True)
+        
+
 class ProcessRawClipBam(sciluigi.Task):
     """Given the alignments from ENCODE, process to get plus and minus strand bedgraph."""
     # inputs
@@ -560,7 +666,7 @@ class GetBedGraphFromBam(sciluigi.Task):
             log.info('making sure all chromosomes get tabix')
             # make a dummy bedgraph file of only chromosomes
             outdummy_file = 'temp.txt'
-            dummy_bed_call = 'awk \'{OFS="\t"}{print $1, "0", "1", "0"}\' %s > %s'%(self.genome_size, outdummy_file )
+            dummy_bed_call = 'awk \'{OFS="\\t"}{print $1, "0", "1", "0"}\' %s > %s'%(self.genome_size, outdummy_file )
             subprocess.call(dummy_bed_call, shell=True)
             
             # concatenate
@@ -683,8 +789,9 @@ class ProcessRNASeq(sciluigi.Task):
         tpm_refseq = biomart_data.groupby('refseq_id')['tpm'].max()
         
         # load bed data
-        bed_data = processing.load_bed(self.in_bed().path, additional_cols=variables.motif_fields_additional) 
-        bed_data.loc[:, 'tpm'] = tpm_refseq.loc[bed_data.refseq_id].values
+        bed_data = processing.load_bed(self.in_bed().path, additional_cols=variables.motif_fields_additional)
+        index = ~bed_data.refseq_id.isnull()
+        bed_data.loc[index, 'tpm'] = tpm_refseq.loc[bed_data.loc[index].refseq_id].values
         log.info('%d out of %d motif sites had no TPM data'%(bed_data.tpm.isnull().sum(), len(bed_data)))
         bed_data.loc[:, ['name', 'tpm']].to_csv(self.out_motif_tpm().path, sep='\t', index=False)
         
@@ -715,6 +822,48 @@ class FindSequence(sciluigi.Task):
         fasta_call = ('awk -v ws=%d \'{OFS="\\t"}{print $1, $2-ws, $3+ws, $4, $5, $6}\' %s | '
                       'bedtools getfasta -s -name -fi %s -bed stdin -fo %s')%(num_up_bases, self.in_bed().path, self.genome_fasta, outfile)
         subprocess.call(fasta_call, shell=True)
+
+class FindPredictedSeqEffect(sciluigi.Task):
+    """From the file with sequence info, and predict relative affinity of that site."""
+    model_param_basename = luigi.Parameter()
+    outdir = luigi.Parameter()
+    temperature = luigi.IntParameter()
+    in_seqdata = None
+    
+    def out_seqdata(self):
+        outfile = os.path.join(self.outdir, self.get_basename() + '.affinity.gz')
+        return sciluigi.TargetInfo(self, outfile)
+    
+    def get_basename(self, ):
+        basename = os.path.basename(os.path.splitext(self.in_seqdata().path)[0] )
+        return basename
+
+    def run(self):
+        # initialize out files
+        outdir = self.outdir
+        if not os.path.exists(outdir):
+            os.makedirs(outdir)
+        
+        # load seqdata
+        seqdata = pd.read_table(self.in_seqdata().path, compression='gzip', index_col=0)
+        seqs = seqdata.seq.str.replace('T', 'U')
+        
+        # run the model
+        base_params     = pd.read_csv(self.model_param_basename + 'term1.csv', index_col=0) #.stack().values
+        flip_params     = pd.read_csv(self.model_param_basename + 'term2_single.csv', index_col=0) #.stack().values
+        dflip_params    = pd.read_csv(self.model_param_basename + 'term2_double.csv', index_col=0, squeeze=True) #.stack().values, 10])
+        coupling_params = pd.read_csv(self.model_param_basename + 'term3.csv', index_col=0, squeeze=True) #.stack().values
+        
+        output = [seqmodel.additive_PUF_flip_model(seq, flip_params, base_params, coupling_params, dflip_params, self.temperature, return_ensemble=True)
+                  for seq in seqs]
+        ddGs = pd.Series({idx:val[0] for val, idx in zip(output, seqs.index.tolist())})
+        ddG_ensembles = pd.concat({idx:val[1] for val, idx in zip(output, seqs.index.tolist())}).unstack()
+        
+        # save
+        pd.concat([ddGs.rename('ddG'), ddG_ensembles], axis=1).to_csv(self.out_seqdata().path, sep='\t', compression='gzip')  
+        
+
+        
 
 class FindMotifSequenceData(sciluigi.Task):
     """From the fasta file, find data about the motif site."""
@@ -868,26 +1017,22 @@ class CombineDataAll(sciluigi.Task):
     in_tpm = None
     in_bed = None
     in_secstructure = None
+    in_effect = None
     outdir = luigi.Parameter()
     window_size = luigi.IntParameter()
     
     def out_table(self, ):
-        return sciluigi.TargetInfo(self, self.get_basename() + '.combined_data.gz')
+        filenames = [target().path for target in self.in_counts.values()]
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, processing.combine_filenames_split(filenames) + '.combined_data.gz'))
 
-    def get_basename(self):
-        name_list = list(itertools.chain(*[os.path.basename(target().path).split('.') for key, target in self.in_counts.items()]))
-        _, idx = np.unique(name_list, return_index=True)
-        name_unique = [name_list[i] for i in np.sort(idx)]
-        basename = '.'.join([s for s in name_unique if s not in ['ann', 'filt', 'bedGraph', 'tracks', 'txt', 'gz', 'counts', 'pkl']])
 
-        return os.path.join(self.outdir, basename)
     
     def run(self, ):
         # make directory f it doesn't exist
         outdir = self.outdir
         if not os.path.exists(outdir):
             os.makedirs(outdir)
-        ipdb.set_trace()
+
         # load counts
         interval_radius = 40 #1/2 width to sum over
         offset = 15
@@ -903,6 +1048,14 @@ class CombineDataAll(sciluigi.Task):
         # load seqdata
         seqdata = pd.read_table(self.in_seq().path, compression='gzip', index_col=0)
 
+        # load seqdata_effects
+        seqeffect =  pd.read_table(self.in_effect().path, compression='gzip', index_col=0)
+        seqeffect.loc[:, 'flag'] = pd.Series({idx:seqmodel.flag_ensemble(row.drop('ddG')-row.ddG) for idx, row in seqeffect.iterrows()})
+
+        kT = seqmodel.get_ddG_conversion(temperature)
+        noflip_cols = [idx for idx in seqeffect if idx.find('noflip')==0]
+        seqeffect.loc[:, 'ddG_noflip'] = kT*np.log(np.exp(seqeffect.loc[:, noflip_cols]/kT).sum(axis=1))
+
         # load bed data
         beddata = processing.load_bed(self.in_bed().path, additional_cols=variables.motif_fields_additional).set_index('name')
         
@@ -917,12 +1070,34 @@ class CombineDataAll(sciluigi.Task):
         ss_dG_diff = (ss_dG_data.loc[:, True] - ss_dG_data.loc[:, False]).rename('ss_ddG')
         
         # combine
-        out_data = pd.concat([beddata, counts, expression, seqdata, ss_dG_diff], axis=1)
+        out_data = pd.concat([beddata, counts, expression, seqdata, seqeffect.ddG, seqeffect.flag, ss_dG_diff], axis=1)
         out_data.loc[:, 'clip_signal_per_tpm'] = (out_data.rep1 + out_data.rep2)/out_data.tpm
         out_data.loc[:, 'clip_input_per_tpm'] = (out_data.input)/out_data.tpm
 
         out_data.to_csv(self.out_table().path, sep='\t', compression='gzip')
+
+
+class CombineSplitData(sciluigi.Task):
+    """Combine al the relevant outputs into a table."""
+    in_data = None
+
+    outdir = luigi.Parameter()
+
+    
+    def out_data(self, ):
+        filenames = [target().path for target in self.in_data.values()]
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, processing.combine_filenames_split(filenames) + '.combined_data.gz'))
+    
+    def run(self, ):
+        # make directory f it doesn't exist
+        outdir = self.outdir
+        if not os.path.exists(outdir):
+            os.makedirs(outdir)
             
+        # load files
+        filename_dict = {key:target().path for key, target in self.in_data.items()}
+        table = pd.concat({key:pd.read_table(filename, compression='gzip', index_col=0) for key, filename in filename_dict.items()}, names=['split_id', 'name'])
+        table.reset_index().to_csv(self.out_data().path, compression='gzip', sep='\t')
 
     
 if __name__ == '__main__':
