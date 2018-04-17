@@ -132,5 +132,45 @@ def normalize_clip_signal_tpm(data, num_reads_total, count_cols=['input', 'rep1'
         data_norm[col + '_norm'] = data.loc[:, col]*weights_site*weights_sample.loc[col]
     return pd.concat(data_norm, axis=1,)
 
+def find_roc_data(data, prediction_column, actual_column, predicted_up=True,):
+    """data is a dataframe containing the prediction column (should be quantitative variable) and actual_column (should be bool)"""
 
-    
+    data_sub = data.dropna(subset=[prediction_column, actual_column]).copy()
+    threshold_values = data_sub.loc[:, prediction_column].quantile(np.linspace(0, 1, 500)).unique()
+    if len(threshold_values)<=2:
+        print "data.loc[:, '%s'] had only two or fewer unique values"%prediction_column
+        return
+
+    actual_positive = data_sub.loc[:, actual_column]
+
+    roc_curve = {}
+    for val in threshold_values:
+        #num_false_positives, num_true_positives = pd.concat([expression_data.sig_up, expression_data.occupancy >= val], axis=1).loc[~expression_data.occupancy.isnull()].groupby([ 'occupancy', 'sig_up']).size().loc[True]
+        if predicted_up:
+            predicted_positive = data_sub.loc[:, prediction_column] >= val
+        else:
+            predicted_positive = data_sub.loc[:, prediction_column] <= val
+        tpr, fpr = get_tpr_fpr(predicted_positive, actual_positive)
+
+        roc_curve[val] = pd.Series({'tpr':tpr, 'fpr':fpr})
+    roc_curve = pd.concat(roc_curve).unstack()
+    return roc_curve
+
+def get_tpr_fpr(predicted_bool_vec, actual_bool_vec):
+    """Given two vectors, one with True/False predicted values, one with True/Fals,e actual values, and return tpr and fpr"""
+    num_actual_positive = actual_bool_vec.sum()
+    num_actual_negative = (~actual_bool_vec).sum()
+    num_false_positives = (predicted_bool_vec&(~actual_bool_vec)).sum()
+    num_true_positives = (predicted_bool_vec&actual_bool_vec).sum()    
+    return float(num_true_positives)/num_actual_positive, float(num_false_positives)/num_actual_negative
+
+
+def get_counts_from_counts_table(data_table, interval_radius=40, offset=15):
+    """For a data table, with each row giving the count per base pair of that site,
+    count the total between the start and end base pair spanning 2*interval_radius, offset by offset"""
+    window_size = data_table.shape[1]
+    start_loc = int(window_size/2-interval_radius-offset)
+    end_loc = start_loc + interval_radius*2
+    return data_table.iloc[:, start_loc:end_loc].sum(axis=1)
+
+        
