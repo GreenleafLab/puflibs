@@ -177,6 +177,7 @@ class FindSequence(sciluigi.Task):
         num_up_bases = int(self.window_size/2.)
         fasta_call = ('awk -v ws=%d \'{OFS="\\t"}{print $1, $2-ws, $3+ws, $4, $5, $6}\' %s | '
                       'bedtools getfasta -s -name -fi %s -bed stdin -fo %s')%(num_up_bases, self.in_bed().path, self.genome_fasta, outfile)
+        print fasta_call
         subprocess.call(fasta_call, shell=True)
 
 

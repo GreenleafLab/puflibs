@@ -17,7 +17,7 @@ from scikits.bootstrap import bootstrap
 from fittinglibs import plotting, seqfun
 from tectolibs import tectplots
 import scipy.cluster.hierarchy as sch
-from puflibs import processing, predictions, seqmodel
+from puflibs import processing, predictions, seqmodel, variables
 # function definitions
 def get_log_enrichment_counts(counts1, counts2):
     return np.log2(counts1/counts1.sum() / (counts2/counts2.sum()))
@@ -56,7 +56,11 @@ if __name__ == '__main__':
     data_37 = pd.read_table('analysis/output/all_unprocessed_st_merged.00.hPUM2_all.random_5e+06.input.ENCFF786ZZB.R2.500.rep2.ENCFF732EQX.rep1.ENCFF231WHF.temp37.combined_data.01.02.03.04.05.06.07.08.09.ENCFF372VPV.ENCFF141SVY.combined_data.gz',  compression='gzip')
     temperature = 37    
     data = data_37
-        
+    data.loc[:, 'min_bases_to_TGTA'] = data.loc[:, ['upstream_bases_to_TGTA', 'downstream_bases_to_TGTA']].min(axis=1)
+    data.loc[:, 'in_transcript'] = (data.annotation == "5' UTR")|(data.annotation == "exon")|(data.annotation == "3' UTR")
+    # remove duplicates
+    data = data.groupby(['chrm', 'start', 'stop']).first().reset_index().copy()
+    
     if args.mode == 'combine_data_all':
         """output of pipeline is split into 10 files. load and combine."""
         filenames = subprocess.check_output('find analysis/output/ -mindepth 2 -name "*combined_data.gz" | sort', shell=True).strip().split()
@@ -102,23 +106,163 @@ if __name__ == '__main__':
         # annotate tpm data with refseq id
         biomart_data.loc[:, 'tpm'] = tpm_combined.loc[biomart_data.transcript_id].values        
         
-        
-    
-    elif args.mode == 'add_col_to_affinity':
-        filenames = subprocess.check_output('find analysis/effects/temp_0 -mindepth 2 -name "*affinity.gz" | sort', shell=True).strip().split()
-        ddG_no_flip = {}
-        ddG_flip = {}
-        temperature = 0
+        # get NORAD
+        tpm_data.loc['ENST00000565493']
+
+    elif args.mode == 'find_consensus_sites_for_ss_structure':
+        """To evaluate secondary structure effects, we want consensus sites in one register"""        
+        filenames = subprocess.check_output('find analysis/effects/temp_%d -mindepth 2 -name "*affinity.gz" | sort'%temperature, shell=True).strip().split()
         kT = seqmodel.get_ddG_conversion(temperature)
-        
+        data_subset = {}
         for i, filename in enumerate(filenames):
-            seqeffect = pd.read_table(filename, compression='gzip', index_col=0)
-            noflip_cols = [idx for idx in seqeffect if idx.find('noflip')==0]
-            ddG_no_flip[i] = (kT*np.log(np.exp(seqeffect.loc[:, noflip_cols]/kT).sum(axis=1)))
-            flip_cols = [idx for idx in seqeffect if idx not in noflip_cols]
-            ddG_flip[i] = (kT*np.log(np.exp(seqeffect.loc[:, flip_cols]/kT).sum(axis=1)))
-        ddG_flip = pd.concat(ddG_flip)
-        ddG_no_flip = pd.concat(ddG_no_flip)
+            split_id = int(filename.split('/')[3].split('_')[-1])
+            if split_id in range(10): # exclude split_10 which is peaks
+                seqeffect = pd.read_table(filename, compression='gzip', index_col=0)
+                name_list = seqeffect.loc[seqeffect.noflip_0 < 0.5].index.tolist()
+                
+                data_subset[split_id] = (data.groupby('split_id').get_group(split_id).drop('split_id', axis=1).set_index('name').
+                                         loc[name_list].copy())
+            
+        data_subset = pd.concat(data_subset, names=['split_id', 'name2']).dropna(subset=['chrm', 'start', 'stop']).reset_index()
+        data_subset.loc[:, 'name'] = data_subset.split_id.astype(str) + ',' + data_subset.name2
+        for col in ['start', 'stop']:
+            data_subset.loc[:, col] = data_subset.loc[:, col].astype(int)
+         
+        data_subset.loc[:, variables.bed_fields].to_csv('analysis/beds/hPUM2_all.first_register_consensus.bed',
+                                                        sep='\t', index=False, header=False, float_format='%.2f')
+    
+    elif args.mode == 'compare_consensus_sites_for_ss_structure':
+        """Evaluate secondary structure effects for 8nt constraint and 11nt constraint"""
+        ss_ddG_table = pd.concat([pd.read_table(filename,
+                               compression='gzip', index_col=0).iloc[:, 6:]
+                             for filename in ['analysis/sec_structure/temp_37/hPUM2_all.first_register_consensus.40.dG.80.10.160.20.combined_data.gz',
+                                              'analysis/sec_structure/temp_37/hPUM2_all.first_register_consensus_8bp.8.dG.2.4.10.6.combined_data.gz']], axis=1)
+        ss_data = pd.read_table(filename, compression='gzip', index_col=0)                       
+
+        # change index
+        split_id, name = [ss_data.name.str.split(',', expand=True)[i] for i in [0,1]]
+        index = pd.MultiIndex.from_tuples([(int(i), s) for i, s in zip(split_id, name)])
+        ss_ddG_table.index = index
+        
+        # find clip signal
+        data_subset = data.set_index(['split_id', 'name']).loc[index].copy()
+        med_background_val = data.loc[(data.tpm>0)&(data.ddG > 4.5)].clip_signal_per_tpm.median()
+        clip_signal_per_tpm_fold = data_subset.clip_signal_per_tpm/med_background_val
+        
+        # bin the ss_ddGs
+        binedges = ss_ddG_table.stack().quantile(np.linspace(0, 1, 15))
+        ss_ddG_binned = pd.cut(ss_ddG_table.stack(), bins=binedges, precision=1, include_lowest=True).rename('ss_ddG')
+        order = pd.DataFrame(ss_ddG_binned).groupby('ss_ddG').first().index.tolist()
+        
+        # find entries in the first bin in at least one energy category
+        first_bin = ss_ddG_binned.loc[ss_ddG_binned == order[0]].unstack().index.tolist()
+        ymax = clip_signal_per_tpm_fold.loc[first_bin].median()
+        x_order = (binedges.values[1:] + binedges.values[:-1])*0.5
+        
+        # plotting function
+        func = functools.partial(sns.factorplot, x='ss_ddG', y='clip_signal_per_tpm',  estimator=np.median,
+                                         errwidth=0.5,capsize=1, linestyles='', marker='.')
+        ylim = [0.5, 500]       
+        for window_size in [4, 6, 8, 10, 12, 20, 40, 80, 160]:
+            data_toplot = (pd.concat([clip_signal_per_tpm_fold,
+                                      ss_ddG_binned.unstack().loc[:, 'ss_ddG_%d'%window_size].rename('ss_ddG')], axis=1)
+                           .loc[(data_subset.tpm>0)&(data_subset.in_transcript)])
+            # plot
+            g = func(data=data_toplot)
+            plt.yscale('log')
+            plt.xticks(rotation=90)
+            plt.axhline(1, color='0.5', linestyle=':')
+            
+            # plot expectation line
+            y = ymax*np.exp(x_order/seqmodel.get_ddG_conversion(temperature))
+            plt.plot(np.arange(len(order)), y, 'k--')
+            plt.ylim(ylim)
+            
+            # labe
+            plt.title('%d nt'%window_size)
+            plt.tight_layout()
+            plt.savefig('scatterplot.clip_signal_vs_ss_ddG.window_size_%d.pdf'%window_size)
+        
+            # also plot histogram
+            plt.figure(figsize=(4.5,3));
+            (data_toplot.groupby('ss_ddG').size().loc[order]).plot(kind='bar')
+            plt.xticks(rotation=90)
+            plt.ylabel('count')
+            plt.tight_layout()
+            sns.despine()
+            plt.title('%d nt'%window_size)
+            plt.savefig('histogram.clip_signal_vs_ss_ddG.window_size_%d.pdf'%window_size)
+        
+        # plot with equally spaced bins
+        binedges = np.hstack([np.arange(0, 5, 0.5), np.logspace(np.log10(4.5), np.log10(ss_ddG_table.stack().max()), 3)])
+        ss_ddG_binned = pd.cut(ss_ddG_table.stack(), bins=binedges, precision=1, include_lowest=True).rename('ss_ddG')
+        order = pd.DataFrame(ss_ddG_binned).groupby('ss_ddG').first().index.tolist()
+        x_order = (binedges[1:] + binedges[:-1])*0.5
+
+        
+        count_cutoff = 20
+        all_data = {}
+        for i, window_size in enumerate([10, 20, 40, 80, 160]):
+            data_toplot = (pd.concat([clip_signal_per_tpm_fold,
+                                      ss_ddG_binned.unstack().loc[:, 'ss_ddG_%d'%window_size].rename('ss_ddG')], axis=1)
+                           .loc[(data_subset.tpm>0)&(data_subset.in_transcript)])
+            to_plot_categories = [category for category, count in data_toplot.ss_ddG.value_counts().iteritems() if count > count_cutoff]
+            
+            all_data[window_size] = data_toplot.loc[np.in1d(data_toplot.ss_ddG, to_plot_categories)]
+            #all_data[window_size] = data_toplot
+        all_data = pd.concat(all_data, names=['window_size', 'split_id', 'name']).reset_index()
+
+        g = func(data=all_data, hue='window_size', hue_order=[20, 40, 160])
+        plt.yscale('log')
+        plt.xticks(rotation=90)
+        plt.axhline(1, color='0.5', linestyle=':')
+        
+        # plot expectation line
+        y = ymax*np.exp((x_order-x_order[0])/seqmodel.get_ddG_conversion(temperature))
+        plt.plot(np.arange(len(order)), y, 'k--')
+        plt.ylim(ylim)
+            
+        
+            
+
+
+    
+    elif args.mode == 'plot_clip_footprint':
+        """Load the clip signal counts and plot the aggregate footprint around consensus sites"""
+        
+        filenames_rep1 = subprocess.check_output('find analysis/clip -mindepth 2 -maxdepth 2 -name "*tracks.txt.gz" | grep split | grep hPUM2_all | grep -v input | grep -v rep2 | sort', shell=True).strip().split()
+        filenames_rep2 = subprocess.check_output('find analysis/clip -mindepth 2 -maxdepth 2 -name "*tracks.txt.gz" | grep split | grep hPUM2_all | grep -v input | grep -v rep1 | sort', shell=True).strip().split()
+        filenames_input = subprocess.check_output('find analysis/clip -mindepth 2 -maxdepth 2 -name "*tracks.txt.gz" | grep split | grep hPUM2_all | grep -v rep2 | grep -v rep1 | sort', shell=True).strip().split()
+
+        # load counts
+        
+        footprints = {}
+        for i, filename in enumerate(filenames_rep1):
+            split_id = int(filename.split('/')[2].split('_')[-1])
+            print split_id
+            footprint = pd.read_csv(filename, compression='gzip', index_col=0)
+            subset_consensus = data.loc[
+                (data.split_id == split_id)&
+                (data.ddG < 0.5)&
+                (data.tpm > 0)&
+                (data.in_transcript)].name
+            footprints[split_id] = footprint.loc[subset_consensus]
+            
+        footprints = pd.concat(footprints, names=['split_id', 'name'])
+        
+        # plot
+        interval_radius=40
+        offset=15
+        xvalues = np.arange(-250, 251)
+        
+        plt.figure(figsize=(3,3))
+        plt.plot(xvalues, footprints.mean())
+        plt.axvline(-interval_radius-offset, color='k', linestyle=':')
+        plt.axvline(+interval_radius-offset, color='k', linestyle=':')
+        plt.ylim(0, 0.6)
+        plt.xlim(-225, 225)
+        plt.savefig('lineplot.footprint.pdf')
+        
                           
     elif args.mode == 'compare_window_size':
         """Load the 500 bp window, and calculate enrichment above background for different window sizes"""
@@ -178,13 +322,25 @@ if __name__ == '__main__':
         seqmodel2.additive_PUF_flip_model(passed_sequence, flip_params, base_penalties, coupling_params, double_flip_params, temperature)
     
     
-    elif (args.mode == 'plot_flip_annot' or args.mode == 'plot_clip_vs_ddG' or args.mode == 'plot_annotation_vs_ddG' or
+    elif (args.mode == 'plot_flip_annot' or args.mode == 'plot_clip_vs_ddG' or
+          args.mode == 'plot_annotation_vs_ddG' or
+          args.mode == 'plot_clip_vs_ddG_per_seq' or
           args.mode=='plot_ss_ddG_versus_clip' or args.mode =='plot_versus_proximity'):
         """Using the New model to find effects, find ddG"""
         pass
+        # annotatie flipped/not flipped
         data.loc[:, 'flip_annot'] = 'noflip'
         data.loc[data.ddG_noflip - data.ddG > 0.5, 'flip_annot'] = 'flip'
-        #data.loc[data.ddG_oneflip - data.ddG > 0.75, 'flip_annot'] = 'dflip'
+        
+        # find fold enrichment above expected bacground
+        med_background_val = data.loc[(data.tpm>0)&(data.ddG > 4.5)].clip_signal_per_tpm.median()
+        med_background_val_input = data.loc[(data.tpm>0)&(data.ddG > 4.5)].clip_input_per_tpm.median()
+        data.loc[:, 'clip_signal_per_tpm_fold'] = data.clip_signal_per_tpm/med_background_val
+        data.loc[:, 'clip_input_per_tpm_fold'] = data.clip_input_per_tpm/med_background_val_input
+
+        # determine the subset of data with expression and within a transcript
+        subdata = data.loc[(data.tpm > 0)&data.in_transcript]
+
         
         if args.mode == 'plot_flip_annot':
             """plot the sites that have flip annotation or not."""
@@ -197,85 +353,124 @@ if __name__ == '__main__':
             plt.xlim(xlim)
             plt.ylim(xlim)
             data.loc[:, 'dddG_noflip'] = data.ddG_noflip - data.ddG
+            bins = np.linspace(0, 5)
             plt.figure(figsize=(3,3)); sns.distplot(data.loc[(data.tpm>0)&(~data.is_random)].dddG_noflip, color=sns.color_palette()[0], bins=bins, kde=False)
-        
-        ddG_binedges = np.hstack([np.linspace(data.ddG.min(), 4.5, 25), data.ddG.max()])
-        data.loc[:, 'binned_ddG'] = pd.cut(data.ddG, ddG_binedges,
-                                           include_lowest=True, precision=2)
-        data.loc[:, 'binned_logtpm'] = pd.cut(np.log10(data.tpm), (np.log10(data.tpm).replace(-np.inf, np.nan).dropna()).quantile(np.linspace(0, 1, 6)), include_lowest=True)
-        order = data.groupby('binned_ddG').first().index.tolist()
-        
-        if args.mode == 'plot_clip_vs_ddG':
-            data.loc[:, 'binned_ddG_noflip'] = pd.cut(data.ddG_noflip, ddG_binedges,
-                                               include_lowest=True, precision=2)
-            med_background_val = data.loc[(data.tpm>0)&(data.ddG > 4.5)].clip_signal_per_tpm.median()
-            med_background_val_input = data.loc[(data.tpm>0)&(data.ddG > 4.5)].clip_input_per_tpm.median()
-           
-            subdata = data.loc[(data.tpm > 0)]
-            subdata.loc[:, 'clip_signal_per_tpm_fold'] = subdata.clip_signal_per_tpm/med_background_val
-            subdata.loc[:, 'clip_input_per_tpm_fold'] = subdata.clip_input_per_tpm/med_background_val_input
+                
 
+        if args.mode=='plot_clip_vs_ddG_per_seq':
+            """Plot per sequences"""
+            count_cutoff = 50
+            represented_seqs = [seq for seq, count in subdata.seq.value_counts().iteritems() if count >=count_cutoff]
+            
+            subsubdata = subdata.loc[np.in1d(subdata.seq.tolist(), represented_seqs)].copy()
+            
+            quantitative_cols = ['ddG', 'ddG_noflip_noens', 'ddG_noflip', 'ddG_flip', 'clip_signal_per_tpm_fold', 'clip_input_per_tpm_fold']
+            nonquantitative_cols = ['flip_annot']
+            subdata_grouped = pd.concat([subsubdata.groupby('seq')[nonquantitative_cols].first(),
+                                         subsubdata.groupby('seq')[quantitative_cols].median()], axis=1)
+            
+        if args.mode == 'plot_clip_vs_ddG':
+
+            """bin by ddG and plot"""
+            ddG_binedges = np.hstack([np.linspace(data.ddG.min(), 4.5, 25), data.ddG.max()])
+            subdata.loc[:, 'binned_ddG'] = pd.cut(subdata.ddG, ddG_binedges,
+                                                  include_lowest=True, precision=2)
+            data.loc[:, 'binned_logtpm'] = pd.cut(np.log10(data.tpm), (np.log10(data.tpm).replace(-np.inf, np.nan).dropna()).quantile(np.linspace(0, 1, 6)), include_lowest=True)
+            data.loc[:, 'binned_min_dist'] = pd.cut(data.min_bases_to_TGTA, [0, 50, 100, 300], include_lowest=True, precision=0)
+            order = data.groupby('binned_ddG').first().index.tolist()
+            
+            # plot
             ylim = [0.5, 100]
             ymax = subdata.groupby('binned_ddG').get_group(order[0])['clip_signal_per_tpm_fold'].median() 
             x_order = pd.Series({name:0.5*(group.ddG.max() + group.ddG.min()) for name, group in subdata.groupby('binned_ddG')})
-            for xval, yval in itertools.product(['binned_ddG', 'binned_ddG_noflip'], ['clip_input_per_tpm_fold', 'clip_signal_per_tpm_fold']):
-
-                func = functools.partial(sns.factorplot, data=subdata, hue='flip_annot', y=yval, estimator=np.median,
-                                         errwidth=0.5,capsize=1, linestyles='', marker='.', hue_order=['noflip', 'flip'])
-                g = func(x=xval); plt.xticks(rotation=90); plt.subplots_adjust(bottom=0.35)
+            
+            func = functools.partial(sns.factorplot, data=subdata, estimator=np.median,
+                                         errwidth=0.5,capsize=1, linestyles='', marker='.')
+            
+            # plot signal, colored by flip/noflip
+            for yval in ['clip_input_per_tpm_fold', 'clip_signal_per_tpm_fold']:
+            
+                g = func(x='binned_ddG', y=yval, hue='flip_annot', hue_order=['noflip', 'flip']);
+                plt.xticks(rotation=90); plt.subplots_adjust(bottom=0.35)
                 plt.axhline(1, color='0.5', linestyle='--');
                 plt.yscale('log')
                 plt.ylim(ylim)
- 
-                
+                # plot expected line
                 y = ymax*np.exp(x_order/seqmodel.get_ddG_conversion(temperature))
                 plt.plot(np.arange(len(order)), y.loc[order], 'k--')
+                plt.savefig('scatterplot.%s.vs.binned_ddG.pdf'%yval)
+            
+            # plot the numbers of flipped sites per bin
+            subdata.groupby(['binned_ddG', 'flip_annot']).size().unstack().loc[:, ['noflip', 'flip']].plot(kind='bar', stacked=True, width=0.8, figsize=(3,3));
+            plt.savefig('barplot.num_flipped.binned_ddG.pdf')
+ 
+            # plot the ddG between flipped and non flipped sites
+            subdata_stable_flipped = subdata.loc[(subdata.ddG < 2)&(subdata.flip_annot=='flip')]
+            plt.figure(figsize=(3,3));
+            sns.distplot(subdata_stable_flipped.ddG_noflip - subdata_stable_flipped.ddG, kde=False, bins=np.linspace(0, 5, 20));
+            plt.axvline((subdata_stable_flipped.ddG_noflip - subdata_stable_flipped.ddG).median())
+            plt.tight_layout()
+            plt.xticks(np.arange(6))
+            plt.yticks([0, 500, 1000, 1500])
+            plt.savefig('histogram.ddG_diffs.flipped_stable_sites.pdf')
 
-                if xval == 'binned_ddG' and yval == 'clip_signal_per_tpm_fold':
-                    # add in the ddG_noflip estimations.
-                    #noflip_mat = pd.concat({name:pd.cut(group.ddG_noflip, ddG_binedges, precision=2, include_lowest=True).value_counts() for name, group in subdata.loc[subdata.flip_annot=='flip'].groupby('binned_ddG')}).unstack()
-                    for name, group in subdata.loc[subdata.flip_annot=='flip'].groupby('binned_ddG'):
-                        row = pd.cut(group.ddG_noflip, ddG_binedges, precision=2, include_lowest=True).value_counts()
-                        if row.max() > 0:
-                            y = group[yval].median()
-                            
-                            #x = order.index(row.idxmax())
-                            #s = float(row.max())/row.sum()*50
-                            #plt.scatter(x, y, edgecolor=sns.color_palette()[1], s=s, color='none')
-                            for idx_new, val in  (row.astype(float)/row.sum()).iteritems():
-                                if val > 0:
-                                    x = order.index(idx_new)
-                                    s = val*50
-                                    plt.scatter(x, y, edgecolor=sns.color_palette()[1], s=s, color='none')
-                            
-                
+            # plot signal, colored by annotation
+            annotation_order = ["3' UTR", "exon"]
+            annotation_colors = ['#f7931d', '0.7']
+            for yval in ['clip_input_per_tpm_fold', 'clip_signal_per_tpm_fold']:
+            
+                g = func(x='binned_ddG', y=yval, hue='annotation', hue_order=annotation_order, palette=annotation_colors);
+                plt.xticks(rotation=90); plt.subplots_adjust(bottom=0.35)
+                plt.axhline(1, color='0.5', linestyle='--');
+                plt.yscale('log')
+                plt.ylim(ylim)
+                # plot expected line
+                y = ymax*np.exp(x_order/seqmodel.get_ddG_conversion(temperature))
+                plt.plot(np.arange(len(order)), y.loc[order], 'k--')
+                plt.savefig('scatterplot.%s.vs.binned_ddG.by_annotation.pdf'%yval)
 
-            # plot by un flipped dG values           
-            x = pd.Series({name:0.5*(group.ddG.max() + group.ddG.min()) for name, group in subdata.groupby('binned_ddG')})
-            y = ymax*np.exp(x/seqmodel.get_ddG_conversion(temperature))
-            g = func(x='binned_ddG_noflip'); plt.xticks(rotation=90); plt.subplots_adjust(bottom=0.35)
-            plt.axhline(med_background_val, color='0.5', linestyle='--')
-            plt.plot(np.arange(len(order)), y.loc[order], 'k--')
-            ylim = [0.05, 20]
-            plt.ylim(ylim)
+            # plot by annotation again but only plot sites at least 100 nt away
+            annotation_order = ["3' UTR", "exon"]
+            annotation_colors = ['#f7931d', '0.7']
+            func2 = functools.partial(sns.factorplot, data=subdata.loc[subdata.binned_min_dist=='(100, 300]'], estimator=np.median,
+                                         errwidth=0.5,capsize=1, linestyles='', marker='.')
+            for yval in ['clip_input_per_tpm_fold', 'clip_signal_per_tpm_fold']:
+            
+                g = func2(x='binned_ddG', y=yval, hue='annotation', hue_order=annotation_order, palette=annotation_colors);
+                plt.xticks(rotation=90); plt.subplots_adjust(bottom=0.35)
+                plt.axhline(1, color='0.5', linestyle='--');
+                plt.yscale('log')
+                plt.ylim(ylim)
+                # plot expected line
+                y = ymax*np.exp(x_order/seqmodel.get_ddG_conversion(temperature))
+                plt.plot(np.arange(len(order)), y.loc[order], 'k--')
+                plt.savefig('scatterplot.%s.vs.binned_ddG.by_annotation.greater_than_100nt.pdf'%yval)
+            
                 
-            plt.figure();
-            x_noflip = subdata.groupby('flip_annot').get_group('noflip').groupby('binned_ddG')['ddG'].median()
-            y_noflip = subdata.groupby('flip_annot').get_group('noflip').groupby('binned_ddG')[yval].median()
-            plt.plot(x_noflip, y_noflip, 'o')
-            for i, (name, group) in enumerate(subdata.groupby('flip_annot').get_group('flip').groupby('binned_ddG')):
-                y = group[yval].median()
-                x = group.ddG.median()
-                x2 = group.ddG_noflip.median()
-                
-                color = sns.color_palette()[1]
-                plt.plot(x, y, 'o', color=color)
-                plt.plot([x, x2], [y, y], '.-', color=color)
-            plt.plot(x_noflip, y_noflip[0]*np.exp(x_noflip/seqmodel.get_ddG_conversion(temperature)), 'k--')
-            ylim = [0.5, 100]
-            plt.ylim(ylim) 
-            plt.yscale('log')
-            plt.axhline(1, color='0.5', linestyle='--');
+            # plot signal, colored by distance to nearest site
+            min_dist_order = ['[0, 50]', '(50, 100]', '(100, 300]']
+            min_dist_colors = ['#f6935a', '#ab665c', '#603e4a']
+            for yval in ['clip_input_per_tpm_fold', 'clip_signal_per_tpm_fold']:
+            
+                g = func(x='binned_ddG', y=yval, hue='binned_min_dist', hue_order=min_dist_order,
+                         palette=min_dist_colors)
+                plt.xticks(rotation=90); plt.subplots_adjust(bottom=0.35)
+                plt.axhline(1, color='0.5', linestyle='--');
+                plt.yscale('log')
+                plt.ylim(ylim)
+                # plot expected line
+                y = ymax*np.exp(x_order/seqmodel.get_ddG_conversion(temperature))
+                plt.plot(np.arange(len(order)), y.loc[order], 'k--')
+                plt.savefig('scatterplot.%s.vs.binned_ddG.by_mindist.pdf'%yval)
+
+            # plot fraction of annotations in distance bins
+            subdata_stable  = subdata.loc[(subdata.ddG < 2)]
+            num_in_annotations = subdata_stable.groupby(['annotation', 'binned_min_dist']).size().unstack()
+            (num_in_annotations.transpose()/num_in_annotations.sum(axis=1)).loc[min_dist_order,annotation_order].transpose().plot(kind='bar', stacked=True, colors=min_dist_colors)
+            plt.savefig('barplot.num_annotations.binned_min_dist.pdf')
+            
+            """
+
 
                 
             
@@ -305,7 +500,7 @@ if __name__ == '__main__':
             plt.plot(np.arange(len(order)), y.loc[order], 'k--')
             ylim = [0.01, 20]
             plt.ylim(ylim)
-            
+            """
             
         # plot by type
         elif args.mode == 'plot_rna_expression_vs_ddG':
@@ -314,10 +509,55 @@ if __name__ == '__main__':
             subdata.loc[:, 'binned_tpm'] = np.digitize(subdata.tpm, np.logspace(-2, 3, 10))
             pass
         
+        elif args.mode == 'plot_overestimation_with_noflip_model':
+            """Try to see if clip signal is overestimated when using ddG_no flip model"""
+            subdata = data.loc[(data.tpm>0)&data.in_transcript&(subdata.min_bases_to_TGTA>=100)]
+            
+            binedges = np.hstack([np.arange(-0.5, 5, 0.5), subdata.ddG.max()])  
+            subdata.loc[:, 'binned_ddG'] = pd.cut(subdata.ddG, binedges,
+                                                  precision=1, include_lowest=True)
+            subdata.loc[:, 'binned_ddGnoflip'] = pd.cut(subdata.ddG_noflip, np.hstack([np.arange(-0.5, 5, 0.5), subdata.ddG.max()]),
+                                                  precision=1, include_lowest=True)
+            order = subdata.groupby('binned_ddG').first().index.tolist()
+            x_order = (binedges[1:] + binedges[:-1])*0.5
+            ymax = subdata.groupby('binned_ddG').get_group(order[0]).clip_signal_per_tpm_fold.median()
 
+            func = functools.partial(sns.factorplot, data=subdata, estimator=np.median,
+                                         errwidth=0.5,capsize=0.5, linestyles='', marker='.')            
+            #plot
+            for xval in ['binned_ddG', 'binned_ddGnoflip']:
+                g = func(x=xval, y='clip_signal_per_tpm_fold', hue='flip_annot', hue_order=['noflip', 'flip']);
+                plt.xticks(rotation=90); plt.subplots_adjust(bottom=0.35)
+                plt.axhline(1, color='0.5', linestyle='--');
+                plt.yscale('log')
+                plt.ylim(ylim)
+                # plot expected line
+                y = ymax*np.exp((x_order-x_order[0])/seqmodel.get_ddG_conversion(temperature))
+                plt.plot(np.arange(len(order)), y, 'k--')
+                plt.savefig('scatterplot.clip_signal_vs_%s.big_bins.greaterthan_100nt.pdf'%xval)
+            
         elif args.mode == 'plot_annotation_vs_ddG':
             """Using New model to find effects, se how enrichment for UTR changes"""
-            expected_fractions = data.loc[data.site.str.find('hPUM') == -1].annotation.value_counts()/(data.site.str.find('hPUM') == -1).sum()
+            
+            in_transcript = (data.annotation=="5' UTR")|(data.annotation=="exon")|(data.annotation=="3' UTR")
+            subdata = data.loc[in_transcript]
+            subdata.loc[:, 'binned_ddG'] = pd.cut(subdata.ddG, np.hstack([np.arange(-0.5, 5, 0.5), subdata.ddG.max()]),
+                                                  precision=1, include_lowest=True)
+            order = subdata.groupby('binned_ddG').first().index.tolist()
+            num_annotations = pd.concat({name:group.annotation.value_counts() for name, group in subdata.groupby('binned_ddG')}).unstack().loc[order].fillna(0)
+            fraction_annotation = (num_annotations.transpose()/num_annotations.sum(axis=1)).transpose()
+            
+            
+            annotation_order = ["3' UTR", "exon", "5' UTR"]
+            annotation_colors = ['#f7931d', '0.7', '#be1e2d']
+            fraction_annotation.loc[:, annotation_order].plot(kind='bar', stacked=True, colors=annotation_colors, figsize=(3,3), width=0.8)
+            plt.ylim(0.4, 1)
+            plt.tight_layout()
+            
+            num_background_annotations = data.loc[data.name.str.find('hPUM') == -1].annotation.value_counts()
+            expected_fractions = num_background_annotations/num_background_annotations.loc[["5' UTR", "exon", "3' UTR"]].sum()
+            
+            sys.exit()
             enrichment = {}
             fraction = {}
             for name, group in data.loc[data.tpm>0].groupby('binned_ddG'):
@@ -336,6 +576,9 @@ if __name__ == '__main__':
             plt.axhline(expected_fractions.loc["3' UTR"], linestyle='--', color='k')
             plt.xlim(-1, len(order))
             plt.ylim(0, 1)
+            
+            
+            
             
         elif args.mode == 'plot_versus_proximity':
             """Plot how the distribution of clip enrichment changes if there are nearby UGUA sites"""
@@ -403,42 +646,18 @@ if __name__ == '__main__':
             pass
             
             
-    elif args.mode == 'compare_to_pum12_kd':
+    elif args.mode == 'compare_to_pum12_kd' or args.mode == 'compare_to_pum2_oe':
         """Load supp data from NAR paper and compare sites."""
-        
-        expression_data = pd.read_csv('annotations/nar-01280/supp_table4.csv')
-        expression_data.loc[:, 'lfc'] = expression_data.lfc.replace('#NAME?', np.nan).astype(float).replace(np.inf, np.nan)        
-        expression_data.loc[:, 'log_fpkm_cntrl'] = np.log10(expression_data.FPKM_NTC)
-
-        # choose randomly from a subset of similarly expressed genes in the control
-        row_subsets = {}
-        length_factor = 5
-        for name, subset in zip(['up_matched', 'down_matched'], [expression_data.sig_up, expression_data.sig_down]):
-
-            kernel = st.gaussian_kde(expression_data.loc[subset].log_fpkm_cntrl)
-            prob_density = kernel(expression_data.loc[~subset].log_fpkm_cntrl)
-
-            kernel_start = st.gaussian_kde(np.random.choice(expression_data.loc[~subset].log_fpkm_cntrl.replace([-np.inf], np.nan).dropna(), 1000))
-            prob_density_orig = kernel_start(expression_data.loc[~subset].log_fpkm_cntrl)
-
-            weights = (pd.Series(prob_density/prob_density_orig/
-                                np.nansum((prob_density/prob_density_orig)), index=expression_data.loc[~subset].index).
-                       replace([-np.inf, np.inf], np.nan).fillna(0))
-
-            row_subsets[name] = np.random.choice(expression_data.loc[~subset].index.tolist(),
-                                                  p=weights,
-                                                  size=int(subset.sum()*length_factor),
-                                                  replace=False)
-            row_subsets[name.split('_')[0]] = expression_data.loc[subset].index.tolist()
-        
         
         # load the biomart ref
         biomart_data = pd.read_table('annotations/ensemble_gene_converter_biomart.txt', names=['gene_id', 'transcript_id', 'gene_name', 'refseq_id', 'refseq_nc'], header=0)
         biomart_data.loc[:, 'refseq_comb'] = [refseq_id if not str(refseq_id)=='nan' else refseq_nc for idx, refseq_id, refseq_nc in biomart_data.loc[:, ['refseq_id', 'refseq_nc']].itertuples()]
-        data.loc[:, 'gene_name'] = pd.Series(biomart_data.groupby('refseq_comb').first().loc[data.refseq_id.dropna()].gene_name.values, index=data.refseq_id.dropna().index)
-        
-
-        
+        if args.mode == 'compare_to_pum12_kd':
+            col_name = 'gene_name'
+        else:
+            col_name = 'gene_id'
+        data.loc[:, 'gene_name'] = pd.Series(biomart_data.groupby('refseq_comb').first().loc[data.refseq_id.dropna()][col_name].values, index=data.refseq_id.dropna().index)
+                
         # group by the gene and find occupancy and other metrics
         RT = -seqmodel.get_ddG_conversion(temperature=37)
         ss_ddG_threshold = 10 # kcal/mol
@@ -462,6 +681,53 @@ if __name__ == '__main__':
                                               'num_sites_between1and4kc_3UTR':num_sites_between1and4kc_3UTR})
         occupancy_data = pd.concat(occupancy_data).unstack()
         occupancy_data.loc[occupancy_data.min_ddG.isnull(), 'min_ddG'] = 10 #kcal.mol
+        
+        # load expression data
+        if args.mode == 'compare_to_pum12_kd':
+            expression_data = pd.read_csv('annotations/nar-01280/supp_table4.csv')
+            expression_data.loc[:, 'lfc'] = expression_data.lfc.replace('#NAME?', np.nan).astype(float).replace(np.inf, np.nan)        
+            expression_data.loc[:, 'log_fpkm_cntrl'] = np.log10(expression_data.FPKM_NTC)
+            expression_fpkm_bins = [-np.inf, 1, 1.5]
+        elif args.mode == 'compare_to_pum2_oe':
+            expression_data = pd.read_table('annotations/GSE75440/GSe75440_PUM2edgeR.txt.gz')
+            expression_data.rename(columns={col:col.lower().replace(' ', '_').replace('.', '_')  for col in expression_data}, inplace=True)  
+            expression_data.loc[:, 'lfc'] = expression_data['logfc_pum2/gfp']
+            expression_data.loc[:, 'log_fpkm_cntrl'] = np.log10(expression_data.loc[:, 'gfp_#1_fpkm':'gfp_#3_fpkm']+0.01).mean(axis=1)
+            expression_data.loc[:, 'gene_id'] = expression_data.gene
+            expression_data.loc[:, 'gene'] = expression_data.genename
+            
+            expression_data.loc[:, 'sig_up'] = (expression_data.adj_pval_tgw < 1E-2)&(expression_data.lfc > 0)
+            expression_data.loc[:, 'sig_down'] = (expression_data.adj_pval_tgw < 1E-2)&(expression_data.lfc < 0)
+
+            expression_fpkm_bins = [-np.inf, 1, 3]
+        sys.exit()
+
+        # choose randomly from a subset of similarly expressed genes in the control
+        """
+        row_subsets = {}
+        length_factor = 5
+        for name, subset in zip(['up_matched', 'down_matched'], [expression_data.sig_up, expression_data.sig_down]):
+
+            kernel = st.gaussian_kde(expression_data.loc[subset].log_fpkm_cntrl)
+            prob_density = kernel(expression_data.loc[~subset].log_fpkm_cntrl)
+
+            kernel_start = st.gaussian_kde(np.random.choice(expression_data.loc[~subset].log_fpkm_cntrl.replace([-np.inf], np.nan).dropna(), 1000))
+            prob_density_orig = kernel_start(expression_data.loc[~subset].log_fpkm_cntrl)
+
+            weights = (pd.Series(prob_density/prob_density_orig/
+                                np.nansum((prob_density/prob_density_orig)), index=expression_data.loc[~subset].index).
+                       replace([-np.inf, np.inf], np.nan).fillna(0))
+
+            row_subsets[name] = np.random.choice(expression_data.loc[~subset].index.tolist(),
+                                                  p=weights,
+                                                  size=int(subset.sum()*length_factor),
+                                                  replace=False)
+            row_subsets[name.split('_')[0]] = expression_data.loc[subset].index.tolist()
+        """
+        
+
+        
+        
         # find roc
         roc_curves = {}
         for name in occupancy_data:
@@ -472,9 +738,9 @@ if __name__ == '__main__':
                 predicted_up=False
             else:
                 predicted_up = True
-            #roc_curves[(name)] =  processing.find_roc_data(expression_data_sub, 'occupancy', 'sig_up')
-            for expression_threshold in [-np.inf, 1, 1.5 ]:
-                roc_curves[(expression_threshold, name)] =  processing.find_roc_data(expression_data_sub.loc[expression_data_sub.log_fpkm_cntrl >= expression_threshold], 'occupancy', 'sig_up', predicted_up=predicted_up, )
+            roc_curves[('any', name)] =  processing.find_roc_data(expression_data_sub, 'occupancy', 'sig_up')
+            #for expression_threshold in expression_fpkm_bins:
+            #    roc_curves[(expression_threshold, name)] =  processing.find_roc_data(expression_data_sub.loc[expression_data_sub.log_fpkm_cntrl >= expression_threshold], 'occupancy', 'sig_up', predicted_up=predicted_up, )
         roc_curves = pd.concat(roc_curves, names=['cntrl_expression', 'occ_def', 'occ_val'])
         g = sns.FacetGrid(data=roc_curves.reset_index(), hue='occ_def', col='cntrl_expression', hue_order=['occupancy_3UTR', 'occupancy_noflip_3UTR', 'occupancy_not3UTR'], palette=['b', 'r', '0.5'], ); g.map(plt.plot, 'fpr', 'tpr', )
         g = sns.FacetGrid(data=roc_curves.reset_index(), hue='occ_def', col='cntrl_expression', hue_order=['occupancy_3UTR', 'min_ddG', 'num_sites_2kc_3UTR', 'num_sites_between1and4kc_3UTR'], palette=['b', 'g', 'm', 'c'], ); g.map(plt.plot, 'fpr', 'tpr', )
