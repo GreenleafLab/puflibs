@@ -100,6 +100,19 @@ def get_coupling_bool_term2(flip_pos):
     else:
         return True
 
+def get_length9_registers(sequence, base_penalties_exp, coupling_params_exp):
+    """for a sequence string, find the set of energies of each 1 nt register."""
+    
+    seq_length = 9
+    registers = {}
+    for i in range(len(sequence)-seq_length+1):
+        ddG = perfect_match_ddG_coupling_terms(sequence[i:i+seq_length], base_penalties_exp, coupling_params_exp, True, True)
+        registers['noflip_%d'%i] = ddG
+    return pd.Series(registers)
+
+
+    
+
 def additive_PUF_flip_model(passed_sequence, flip_params, base_penalties, coupling_params, double_flip_params, temperature, return_ensemble=False):
     # Inputs
     # passed sequence--sequence to compute the affinity for
@@ -199,29 +212,6 @@ def flag_ensemble(ddG_ensemble_vec, cutoff=1):
     flag =  annotations.loc[close_enough_vec].unique().sum()
     return flag
     
-
-# listed as 1A, 1C, 1G, 1U, 2A, ...
-base_penalties = np.array([3.063664683,2.896013434,3.103800265, 0,
-                            1.895136766,3.34,0,3,
-                            2.531742704,2.486987443,3.060000025,0,
-                            0,1.889954126,1.46,1.467450288,
-                            -0.008013914,0.185695013,0.850164022,0,
-                            0,1.695793602,1.780814754,1.34,
-                            1.574979046,1.91,1.22,0,
-                            0,1.527384329,1.49,0.931994394,
-                            0.273578352,0.240917276,0.11,0])
-
-# listed as 3/4A, 3/4C, 3/4G, 3/4U, 4/5A, ...
-flip_params = np.array([7, 1.8015, 7, 1.3453, 
-                        7, 7, 7, 7, 
-                        1.094, 1.138, 1.559, 0.8195, 
-                        7, 1.936, 7, 1.496])
-
-# listed as 3/4,4/5,5/6,6/7 double flip terms
-double_flip_params = [10,3.406,2.116,3.341]
-
-# listed as 567G8 coupling term first and 7C8 coupling term second
-coupling_params = [-1.261,-0.7003]
-
-# ex function call
-# additive_PUF_flip_model('UGUAUACAA', flip_params, base_penalties, coupling_params, double_flip_params, 25)
+def determine_seq_occupancy(seq, temperature):
+    """Break a seq up into 11 nt chunks and return occupancy relative to consensus site for each seq."""
+    
