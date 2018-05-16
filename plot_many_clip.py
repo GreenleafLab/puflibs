@@ -324,6 +324,8 @@ if __name__ == '__main__':
     
     elif (args.mode == 'plot_flip_annot' or args.mode == 'plot_clip_vs_ddG' or
           args.mode == 'plot_annotation_vs_ddG' or
+          args.mode == 'plot_overestimation_with_noflip_model' or
+          args.mode == 'plot_intron_clip_subset' or
           args.mode == 'plot_clip_vs_ddG_per_seq' or
           args.mode=='plot_ss_ddG_versus_clip' or args.mode =='plot_versus_proximity'):
         """Using the New model to find effects, find ddG"""
@@ -357,7 +359,7 @@ if __name__ == '__main__':
             plt.figure(figsize=(3,3)); sns.distplot(data.loc[(data.tpm>0)&(~data.is_random)].dddG_noflip, color=sns.color_palette()[0], bins=bins, kde=False)
                 
 
-        if args.mode=='plot_clip_vs_ddG_per_seq':
+        elif args.mode=='plot_clip_vs_ddG_per_seq':
             """Plot per sequences"""
             count_cutoff = 50
             represented_seqs = [seq for seq, count in subdata.seq.value_counts().iteritems() if count >=count_cutoff]
@@ -369,15 +371,15 @@ if __name__ == '__main__':
             subdata_grouped = pd.concat([subsubdata.groupby('seq')[nonquantitative_cols].first(),
                                          subsubdata.groupby('seq')[quantitative_cols].median()], axis=1)
             
-        if args.mode == 'plot_clip_vs_ddG':
+        elif args.mode == 'plot_clip_vs_ddG':
 
             """bin by ddG and plot"""
             ddG_binedges = np.hstack([np.linspace(data.ddG.min(), 4.5, 25), data.ddG.max()])
             subdata.loc[:, 'binned_ddG'] = pd.cut(subdata.ddG, ddG_binedges,
                                                   include_lowest=True, precision=2)
-            data.loc[:, 'binned_logtpm'] = pd.cut(np.log10(data.tpm), (np.log10(data.tpm).replace(-np.inf, np.nan).dropna()).quantile(np.linspace(0, 1, 6)), include_lowest=True)
-            data.loc[:, 'binned_min_dist'] = pd.cut(data.min_bases_to_TGTA, [0, 50, 100, 300], include_lowest=True, precision=0)
-            order = data.groupby('binned_ddG').first().index.tolist()
+            subdata.loc[:, 'binned_logtpm'] = pd.cut(np.log10(subdata.tpm), (np.log10(subdata.tpm).replace(-np.inf, np.nan).dropna()).quantile(np.linspace(0, 1, 4)), include_lowest=True)
+            subdata.loc[:, 'binned_min_dist'] = pd.cut(subdata.min_bases_to_TGTA, [0, 50, 100, 300], include_lowest=True, precision=0)
+            order = subdata.groupby('binned_ddG').first().index.tolist()
             
             # plot
             ylim = [0.5, 100]
@@ -469,6 +471,24 @@ if __name__ == '__main__':
             (num_in_annotations.transpose()/num_in_annotations.sum(axis=1)).loc[min_dist_order,annotation_order].transpose().plot(kind='bar', stacked=True, colors=min_dist_colors)
             plt.savefig('barplot.num_annotations.binned_min_dist.pdf')
             
+            # plot the effect of expression
+            # plot signal, colored by flip/noflip
+            tpm_order = subdata.groupby('binned_logtpm').first().index.tolist()
+            for yval in ['clip_input_per_tpm_fold', 'clip_signal_per_tpm_fold']:
+            
+                g = func2(x='binned_ddG', y=yval, hue='binned_logtpm', );
+                plt.xticks(rotation=90); plt.subplots_adjust(bottom=0.35)
+                plt.axhline(1, color='0.5', linestyle='--');
+                plt.yscale('log')
+                plt.ylim(ylim)
+                # plot expected line
+                y = ymax*np.exp(x_order/seqmodel.get_ddG_conversion(temperature))
+                plt.plot(np.arange(len(order)), y.loc[order], 'k--')
+                plt.savefig('scatterplot.%s.vs.binned_ddG.pdf'%yval)            
+            
+            
+            
+            
             """
 
 
@@ -513,20 +533,31 @@ if __name__ == '__main__':
             """Try to see if clip signal is overestimated when using ddG_no flip model"""
             subdata = data.loc[(data.tpm>0)&data.in_transcript&(subdata.min_bases_to_TGTA>=100)]
             
-            binedges = np.hstack([np.arange(-0.5, 5, 0.5), subdata.ddG.max()])  
+            binedges = np.hstack([np.arange(-0.5, 5, 0.5), subdata.ddG.max()])
+            binedges = np.hstack([subdata.loc[(subdata.ddG < 4.5)&(subdata.ddG_noflip < 4.5), ['ddG', 'ddG_noflip']].stack().quantile(np.linspace(0, 1, 20)).values,
+                                  max(subdata.ddG.max(), subdata.ddG_noflip.max())])
+            binedges = np.hstack([np.linspace(data.ddG.min(), 4.5, 25), data.ddG.max()])
+
             subdata.loc[:, 'binned_ddG'] = pd.cut(subdata.ddG, binedges,
                                                   precision=1, include_lowest=True)
-            subdata.loc[:, 'binned_ddGnoflip'] = pd.cut(subdata.ddG_noflip, np.hstack([np.arange(-0.5, 5, 0.5), subdata.ddG.max()]),
+            subdata.loc[:, 'binned_ddGnoflip'] = pd.cut(subdata.ddG_noflip, binedges,
                                                   precision=1, include_lowest=True)
             order = subdata.groupby('binned_ddG').first().index.tolist()
             x_order = (binedges[1:] + binedges[:-1])*0.5
             ymax = subdata.groupby('binned_ddG').get_group(order[0]).clip_signal_per_tpm_fold.median()
-
-            func = functools.partial(sns.factorplot, data=subdata, estimator=np.median,
-                                         errwidth=0.5,capsize=0.5, linestyles='', marker='.')            
+            ylim = [0.1, 100]
+            func = functools.partial(sns.factorplot, estimator=np.median,
+                                         errwidth=0.5,capsize=0.5, linestyles='', marker='.')
+            
+             
+            
             #plot
+            yval = 'clip_signal_per_tpm_fold'
+            count_cutoff = 25
             for xval in ['binned_ddG', 'binned_ddGnoflip']:
-                g = func(x=xval, y='clip_signal_per_tpm_fold', hue='flip_annot', hue_order=['noflip', 'flip']);
+                subsubdata = pd.concat([group for name, group in subdata.groupby([xval, 'flip_annot']) if len(group) > count_cutoff])
+                g = func(data=pd.concat([subsubdata.loc[:,[xval, 'flip_annot']], subsubdata[yval] + 0.1], axis=1), x=xval, y=yval, hue='flip_annot', hue_order=['noflip', 'flip'], order=order);
+                
                 plt.xticks(rotation=90); plt.subplots_adjust(bottom=0.35)
                 plt.axhline(1, color='0.5', linestyle='--');
                 plt.yscale('log')
@@ -535,29 +566,98 @@ if __name__ == '__main__':
                 y = ymax*np.exp((x_order-x_order[0])/seqmodel.get_ddG_conversion(temperature))
                 plt.plot(np.arange(len(order)), y, 'k--')
                 plt.savefig('scatterplot.clip_signal_vs_%s.big_bins.greaterthan_100nt.pdf'%xval)
+        
+        elif args.mode == 'plot_intron_clip_subset':
+            """Using a small subset of sites for which the clip signal was determined for intronic sites, find the enrichment"""
+            data_intron = pd.read_table('analysis/output/split_0/all_unprocessed_st_merged.09.hPUM2_odds9.intron_filt.input.ENCFF786ZZB.R2.500.rep2.ENCFF732EQX.rep1.ENCFF231WHF.temp0.combined_data.gz')
+            data_intron.loc[:, 'min_bases_to_TGTA'] = data_intron.loc[:, ['upstream_bases_to_TGTA', 'downstream_bases_to_TGTA']].min(axis=1)
+
+            subdata_intron = data_intron.loc[(data_intron.tpm>0)&(data_intron.min_bases_to_TGTA>=100)]
+            subdata_intron.loc[:, 'clip_signal_per_tpm_fold'] = subdata_intron.clip_signal_per_tpm/med_background_val
+            subdata = data.loc[data.in_transcript&(data.tpm>0)&(data.min_bases_to_TGTA>=100)]
+            
+            # plot
+            annotation_order = ["3' UTR", "exon"]
+            annotation_colors = ['#f7931d', '0.7']
+            g = sns.FacetGrid(data=subdata.loc[subdata.ddG<0.5], hue='annotation',
+                              hue_order=annotation_order, palette=annotation_colors);
+            g.map(tectplots.plot_cdf, 'clip_signal_per_tpm_fold');
+            tectplots.plot_cdf(subdata_intron['clip_signal_per_tpm_fold'], color='#494979'); plt.xscale('log')
+
+            
+            sys.exit()
+            # find subset of sites in data_intron with similar tpm and sequence
+            subsubdata = []
+            weights_seq = []
+            n_expected = len(subdata_intron)/float(len(subdata_intron.seq.value_counts()))
+            for seq, n in subdata_intron.seq.value_counts().iteritems():
+                index = subdata.loc[subdata.seq == seq].index.tolist()
+                subsubdata.append(subdata.loc[index])
+                weights_seq.append(pd.Series(float(n)/len(index), index=index))
+            subsubdata = pd.concat(subsubdata)
+            weights_seq = pd.concat(weights_seq)
+
+            # subset subdata to get approximately equal tpm
+            binedges = pd.concat([subsubdata.tpm, subdata_intron.tpm]).quantile(np.linspace(0, 1, 20))
+            counts_per_bin_target = pd.DataFrame(pd.cut(subdata_intron.tpm, binedges.values, precision=1, include_lowest=True).rename('binned_val')).groupby('binned_val').size()
+            counts_per_bin_current = pd.DataFrame(pd.cut(subsubdata.tpm, binedges.values, precision=1, include_lowest=True).rename('binned_val')).groupby('binned_val').size()
+            
+            weights_per_bin = counts_per_bin_target/counts_per_bin_current
+            weights_tpm = pd.Series(weights_per_bin.loc[pd.cut(subsubdata.tpm, binedges.values, precision=1, include_lowest=True)].values, index=subsubdata.index)
+
+            # resample with weights
+            index_sub = np.random.choice(subsubdata.index.tolist(), p=(weights_seq*weights_tpm)/(weights_seq*weights_tpm).sum(), size=len(subsubdata))
+            subsubdata_resampled = subsubdata.loc[index_sub]
+            
+            # plot each
+            plt.figure(); sns.distplot(np.log10(subdata_intron.tpm)); sns.distplot(np.log10(subsubdata_resampled.tpm))
+            plt.figure(); sns.distplot(subdata_intron.ddG, bins=bins, kde=False, norm_hist=True); sns.distplot(subsubdata.loc[index_sub].ddG, bins=bins, kde=False, norm_hist=True)
+            
+
             
         elif args.mode == 'plot_annotation_vs_ddG':
             """Using New model to find effects, se how enrichment for UTR changes"""
+
+            annotation_order = ["3' UTR", "exon", "5' UTR"]
+            annotation_colors = ['#f7931d', '0.7', '#be1e2d']
             
-            in_transcript = (data.annotation=="5' UTR")|(data.annotation=="exon")|(data.annotation=="3' UTR")
-            subdata = data.loc[in_transcript]
+            # examine only sites with some hPUM annotation
+            subdata = data.loc[data.in_transcript&(data.name.str.find('hPUM') == 0)]
+            
+            # find fraction per ddG bin
             subdata.loc[:, 'binned_ddG'] = pd.cut(subdata.ddG, np.hstack([np.arange(-0.5, 5, 0.5), subdata.ddG.max()]),
                                                   precision=1, include_lowest=True)
             order = subdata.groupby('binned_ddG').first().index.tolist()
             num_annotations = pd.concat({name:group.annotation.value_counts() for name, group in subdata.groupby('binned_ddG')}).unstack().loc[order].fillna(0)
             fraction_annotation = (num_annotations.transpose()/num_annotations.sum(axis=1)).transpose()
             
-            
-            annotation_order = ["3' UTR", "exon", "5' UTR"]
-            annotation_colors = ['#f7931d', '0.7', '#be1e2d']
-            fraction_annotation.loc[:, annotation_order].plot(kind='bar', stacked=True, colors=annotation_colors, figsize=(3,3), width=0.8)
-            plt.ylim(0.4, 1)
+            # add background expections
+            num_background_annotations = data.loc[data.name.str.find('hPUM') == -1].annotation.value_counts().loc[annotation_order]
+            expected_fractions = num_background_annotations/num_background_annotations.sum()
+            fraction_annotation.loc['expected'] = expected_fractions
+
+            # plot
+            fraction_annotation.loc[:, annotation_order].plot(kind='bar', stacked=True, colors=annotation_colors, figsize=(3,3), width=0.6)
+            plt.ylim(0, 1)
             plt.tight_layout()
             
-            num_background_annotations = data.loc[data.name.str.find('hPUM') == -1].annotation.value_counts()
-            expected_fractions = num_background_annotations/num_background_annotations.loc[["5' UTR", "exon", "3' UTR"]].sum()
+            # plot enrichment relative to high ddG bin
+            np.log2((fraction_annotation/fraction_annotation.loc[order[-1]]).loc[order, annotation_order]).plot(kind='bar', colors=annotation_colors, figsize=(3,3), width=0.8)
             
             sys.exit()
+            # also find expected fractions given the refgene table
+            three_UTR_len_list = subprocess.check_output('cat annotations/refseq/hg38_refGene.txt | awk \'{OFS="\\t"}{if ($4=="-") {l=$7-$5} else if ($4=="+") {l=$6-$8} else {l="3UTR_length"}; print $13, l}\'', shell=True).strip().split('\n')
+            three_UTR_len = pd.DataFrame([[s.split('\t')[0], int(s.split('\t')[1])] for s in three_UTR_len_list[1:]], columns=three_UTR_len_list[0].split()).groupby('name2')['3UTR_length'].median()
+            
+            # get CDS len
+
+            # get 5' UTR len
+            five_UTR_len_list = subprocess.check_output('cat annotations/refseq/hg38_refGene.txt | awk \'{OFS="\\t"}{if ($4=="-") {l=$6-$8} else if ($4=="+") {l=$7-$5} else {l="5UTR_length"}; print $13, l}\'', shell=True).strip().split('\n')
+            five_UTR_len_df = pd.DataFrame([[s.split('\t')[0], int(s.split('\t')[1])] for s in five_UTR_len_list[1:]], columns=five_UTR_len_list[0].split())
+            five_UTR_len = five_UTR_len_df.groupby('name2')['5UTR_length'].median()
+            
+            
+            
             enrichment = {}
             fraction = {}
             for name, group in data.loc[data.tpm>0].groupby('binned_ddG'):
@@ -668,6 +768,8 @@ if __name__ == '__main__':
             occupancy_3UTR = np.exp(-group_3UTR.ddG/RT).sum()
             occupancy_noflip_3UTR = np.exp(-group_3UTR.ddG_noflip/RT).sum()
             num_consensus_3UTR = (group_3UTR.ddG < 0.5).sum()
+            num_consensus_CDS = (group.loc[(group.annotation=="exon")].ddG < 0.5).sum()
+
             num_sites_2kc_3UTR = (group_3UTR.ddG < 2).sum()
             num_sites_between1and4kc_3UTR = ((group_3UTR.ddG < 4)&(group_3UTR.ddG >= 1)).sum()
             min_dG_3UTR = group_3UTR.ddG.min()
@@ -677,6 +779,7 @@ if __name__ == '__main__':
                                               'occupancy_not3UTR':occupancy_not3UTR,
                                               'min_ddG':min_dG_3UTR,
                                               'num_consensus_3UTR':num_consensus_3UTR,
+                                              'num_consensus_CDS':num_consensus_CDS,
                                               'num_sites_2kc_3UTR':num_sites_2kc_3UTR,
                                               'num_sites_between1and4kc_3UTR':num_sites_between1and4kc_3UTR})
         occupancy_data = pd.concat(occupancy_data).unstack()
@@ -693,12 +796,12 @@ if __name__ == '__main__':
             expression_data.rename(columns={col:col.lower().replace(' ', '_').replace('.', '_')  for col in expression_data}, inplace=True)  
             expression_data.loc[:, 'lfc'] = expression_data['logfc_pum2/gfp']
             expression_data.loc[:, 'log_fpkm_cntrl'] = np.log10(expression_data.loc[:, 'gfp_#1_fpkm':'gfp_#3_fpkm']+0.01).mean(axis=1)
-            expression_data.loc[:, 'gene_id'] = expression_data.gene
-            expression_data.loc[:, 'gene'] = expression_data.genename
+            #expression_data.loc[:, 'gene_id'] = expression_data.gene
+            #expression_data.loc[:, 'gene'] = expression_data.genename
             
             expression_data.loc[:, 'sig_up'] = (expression_data.adj_pval_tgw < 1E-2)&(expression_data.lfc > 0)
             expression_data.loc[:, 'sig_down'] = (expression_data.adj_pval_tgw < 1E-2)&(expression_data.lfc < 0)
-
+            #expression_data.set_index('gene', inplace=True)
             expression_fpkm_bins = [-np.inf, 1, 3]
         sys.exit()
 
@@ -738,7 +841,7 @@ if __name__ == '__main__':
                 predicted_up=False
             else:
                 predicted_up = True
-            roc_curves[('any', name)] =  processing.find_roc_data(expression_data_sub, 'occupancy', 'sig_up')
+            roc_curves[('any', name)] =  processing.find_roc_data(expression_data_sub, 'occupancy', 'sig_down')
             #for expression_threshold in expression_fpkm_bins:
             #    roc_curves[(expression_threshold, name)] =  processing.find_roc_data(expression_data_sub.loc[expression_data_sub.log_fpkm_cntrl >= expression_threshold], 'occupancy', 'sig_up', predicted_up=predicted_up, )
         roc_curves = pd.concat(roc_curves, names=['cntrl_expression', 'occ_def', 'occ_val'])
@@ -1419,7 +1522,7 @@ if __name__ == '__main__':
         from hjh import mutations
         
         consensus_seq = 'UGUAUAUAG'
-        Single = predictions.Single()
+        #Single = predictions.Single()
         eps = 0.1
         max_ddG = 4 # kcal/mol
         # make up to 3 mutations in consensus_seq

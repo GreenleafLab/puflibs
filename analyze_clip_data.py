@@ -38,6 +38,7 @@ class MyWorkflow(sciluigi.WorkflowTask):
     temperature = luigi.IntParameter(default=0)
     num_random = luigi.IntParameter(default=5000000)
     randomseed = luigi.FloatParameter(default=np.nan)
+    filter_genetype = luigi.IntParameter(default=1)
     
     # sec structure processing inputs
     ss_window_size = luigi.IntParameter(default=100)
@@ -118,8 +119,8 @@ class MyWorkflow(sciluigi.WorkflowTask):
                 # combine motif and random bed, annotate, and filter
                 combinebed = self.new_task('combinebeds_%d'%i, scltasks.CombineBeds, outdir=os.path.join(self.outdir, 'beds/split/%d'%i))
                 combinebed.in_beds = [makemotifbed.out_bed, getattr(dividebedrandom, 'out_bed%d'%i)]
-                filter_genetype = True
-            
+                filter_genetype = bool(self.filter_genetype)
+                ##### TO DO: make TRUE/or an option ####
             elif i == num_iter:
                 ###### APPEND THE CLIP PEAKS ######
                 makemotifbed = self.new_task('makemotifbed_%d'%i, MakeBedFileHomer, genome=self.genome, seq_length=self.len_consensus_seq, outdir=os.path.join(self.outdir, 'beds/split/%d'%i), motif=self.motif_file)
@@ -218,7 +219,7 @@ class MyWorkflow(sciluigi.WorkflowTask):
         combinesplits.in_data = {key:target.out_table for key, target in combinedataall.items()}
         #return combinesplits
 
-        return findtotalreads.values()
+        return combinesplits
 
 
 
