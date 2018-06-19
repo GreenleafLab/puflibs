@@ -1,0 +1,1 @@
+python predictSequenceKd.py -fi resources/pum2_3UTR.fasta -p -o resources/example_output/run1/pum2_3UTR_occupancy.dat

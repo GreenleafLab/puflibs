@@ -1,0 +1,1 @@
+python predictSequenceKd.py -s CCCCUGUAUAUAGCCCCCUGUAAUAUAGCCCC -p -o resources/example_output/run2/run2.dat > resources/example_output/run2/run2.dat
