@@ -35,7 +35,7 @@ class MyWorkflow(sciluigi.WorkflowTask):
     motif_file = luigi.Parameter(default='annotations/RNAmap/hPUM2_all.motif')
     num_muts = luigi.IntParameter(default=1)
     window_size = luigi.IntParameter(default=500)
-    temperature = luigi.IntParameter(default=0)
+    temperature = luigi.IntParameter(default=37)
     num_random = luigi.IntParameter(default=5000000)
     randomseed = luigi.FloatParameter(default=np.nan)
     filter_genetype = luigi.IntParameter(default=1)
@@ -107,8 +107,9 @@ class MyWorkflow(sciluigi.WorkflowTask):
         ####### FIND MOTIFS IN REGIONS ########
         # iterate over all the region beds
         num_iter = 10
-        iter_values = range(num_iter+1)
-        #iter_values = [9,10]
+        #iter_values = range(num_iter+1)
+        iter_values = range(num_iter)
+
         for i in iter_values:
             # normal workflow, i = 1:10:
             if i < num_iter:
@@ -121,6 +122,7 @@ class MyWorkflow(sciluigi.WorkflowTask):
                 combinebed.in_beds = [makemotifbed.out_bed, getattr(dividebedrandom, 'out_bed%d'%i)]
                 filter_genetype = bool(self.filter_genetype)
                 ##### TO DO: make TRUE/or an option ####
+            
             elif i == num_iter:
                 ###### APPEND THE CLIP PEAKS ######
                 makemotifbed = self.new_task('makemotifbed_%d'%i, MakeBedFileHomer, genome=self.genome, seq_length=self.len_consensus_seq, outdir=os.path.join(self.outdir, 'beds/split/%d'%i), motif=self.motif_file)
