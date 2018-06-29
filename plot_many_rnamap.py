@@ -251,6 +251,25 @@ if args.mode == 'plot_single_muts':
         plt.xlim(-2, 2)
         plt.ylim(0, 3.6)
         plt.tight_layout()
-
+        
+if args.mode=='plot_fit_param_values':
+    """Plot the parameters for Kd,NS, fmin, and fmax for variants."""
+    RT = 0.582
+    #fitted_values = pd.read_pickle('data_refit/hPUM2_AM4NT/binding_curves/hPUM2_AM4NT.CPfitted.pkl')
+    #annotated_clusters = pd.read_pickle('data_refit/hPUM2_AM4NT/binding_curves/hPUM2_AM4NT.CPfitted.pkl')
+    
+    init_variant_table = pd.read_pickle('data_refit/hPUM2_AM4NT/binding_curves/hPUM2_AM4NT_init.CPvariant.pkl')
+    concentrations = fileio.loadFile('data_refit/hPUM2_AM4NT/binding_curves/concentrations.txt')
+    
+    frac_bound_threshold = 0.95
+    dGmax = RT*np.log((1-frac_bound_threshold)/frac_bound_threshold*concentrations[-1]/1E9)
+    
+    subset_variants = init_variant_table.loc[(init_variant_table.pvalue < 0.01)&(init_variant_table.dG < dGmax)].index.tolist()
+    
+    # plot fmin, fmax, kd init
+    for param in ['fmin', 'fmax', 'dGns', 'dG']:
+        tectplots.figure()
+        tectplots.distplot(init_variant_table.loc[subset_variants, param])
+    
 
         
