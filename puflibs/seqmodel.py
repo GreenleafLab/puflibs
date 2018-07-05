@@ -49,8 +49,8 @@ def perfect_match_ddG_coupling_terms(sequence, base_penalties, coupling_terms, f
             sequence[6] == 'G' and
             sequence[7] != 'A'):
             ddG = ddG + coupling_terms.loc['c1']
-    if second_coupling:
-        if sequence[6] == 'C' and sequence[7] != 'A':
+    if second_coupling: # added sequence[5] != 'A' 20180629 WRB
+        if sequence[5] != 'A' and sequence[6] == 'C' and sequence[7] != 'A':
             ddG = ddG + coupling_terms.loc['c2']
 
     return ddG
@@ -82,7 +82,7 @@ def perfect_match_exp_ddG_coupling_terms(sequence, base_penalties_exp, coupling_
             sequence[7] != 'A'):
             ddG = ddG*coupling_terms_exp.loc['c1']
     if second_coupling:
-        if sequence[6] == 'C' and sequence[7] != 'A':
+        if sequence[5] != 'A' and sequence[6] == 'C' and sequence[7] != 'A': # 20180629 Added sequence[5] != 'A' condition WRB
             ddG = ddG*coupling_terms_exp.loc['c2']
 
     return ddG
@@ -118,14 +118,16 @@ def compute_ensemble_ddG(single_dG_values, temperature, needs_exponentiating=Fal
 
 def get_coupling_bool_term1(flip_pos):
     # oonly apply the first coupling term if there is no flip at position 4, 5
-    if flip_pos==4 or flip_pos==5:
+    # 20180629 added flip_pos==6 WRB
+    if flip_pos==4 or flip_pos==5 or flip_pos==6:
         return False
     else:
         return True
     
 def get_coupling_bool_term2(flip_pos):
     # oonly apply the second coupling term if there is no flip at position 5
-    if flip_pos==5:
+    # 20180629 added flip_pos==6 WRB
+    if flip_pos==5 or flip_pos==6:
         return False
     else:
         return True
@@ -168,17 +170,20 @@ def get_2flip_registers(sequence, base_penalties, coupling_params, flip_params, 
     registers = {}
     for i in range(len(sequence)-seq_length+1):
         current_sequence = sequence[i:i+seq_length]
-        
         # 2x1nt flips
         for flip_pos1, flip_pos2 in itertools.combinations(possible_flip_positions, 2):
             
             # if the two positions are right next to each other, don't include here because these are the same as double flips
-            if np.abs(flip_pos1 - flip_pos2) <= 1:
-                continue
+            # commented out 20180629 WRB
+            #if np.abs(flip_pos1 - flip_pos2) <= 1:
+            #    continue
             
-            seq_not_flipped = current_sequence[:flip_pos1]+current_sequence[flip_pos1+1:flip_pos2] + current_sequence[flip_pos2+1:]
+            # 20180629 adjusted indexes :flip_pos2] to :flip_pos2+1] and flip_pos2+1: to flip_pos2+2:
+            seq_not_flipped = current_sequence[:flip_pos1]+current_sequence[flip_pos1+1:flip_pos2+1] + current_sequence[flip_pos2+2:]
             flip_base1 = current_sequence[flip_pos1]
-            flip_base2 = current_sequence[flip_pos2]
+            flip_base2 = current_sequence[flip_pos2+1]
+
+
 
             dG = (flip_params.loc[flip_pos1, flip_base1] + # this is the penalty of flipping the residue 1
                   flip_params.loc[flip_pos2, flip_base2] + # this is the penalty of flipping the residue 2
@@ -193,12 +198,12 @@ def get_2flip_registers(sequence, base_penalties, coupling_params, flip_params, 
         # 1x2nt flips
         for flip_pos in possible_double_flip_pos:
 
-            seq_not_flipped = current_sequence[:flip_pos]+current_sequence[flip_pos+2:]
+            seq_not_flipped = current_sequence[:flip_pos+1]+current_sequence[flip_pos+3:] #20180609 changed from flip_pos to flip_pos+1 and flip_pos+2 to flip_pos+3 WRB
             dG = (double_flip_params.loc[flip_pos] +
                   perfect_match_ddG_coupling_terms(seq_not_flipped, base_penalties, coupling_params,
                                                    get_coupling_bool_term1(flip_pos),
                                                    get_coupling_bool_term2(flip_pos)))
-            
+
             registers[('%d:%d'%(i, i+seq_length), 'pos%d_2nt'%(flip_pos))] = dG
 
     registers = pd.Series(registers)
@@ -216,6 +221,7 @@ def find_energy_for_1nt_sequence_registers(sequence, base_penalties, coupling_pa
     linear_binding_ddGs = get_noflip_registers(sequence, base_penalties, coupling_params)
     oneflip_binding_ddGs = get_1flip_registers(sequence, base_penalties, coupling_params, flip_params)
     twoflip_binding_ddGs = get_2flip_registers(sequence, base_penalties, coupling_params, flip_params, double_flip_params)
+
     seq_length_linear = 9
     seq_length_oneflip = 10
     seq_length_twoflip = 11
@@ -249,6 +255,8 @@ def find_energy_for_1nt_sequence_registers(sequence, base_penalties, coupling_pa
         except ValueError:
             ipdb.set_trace()
         # combine into a single ensemble ddG
+
+
         ddG = compute_ensemble_ddG(ddGs, temperature, needs_exponentiating=True)
         ddGs_final[i] = ddG
         
@@ -257,6 +265,7 @@ def find_energy_for_1nt_sequence_registers(sequence, base_penalties, coupling_pa
 
 def find_energy_for_11nt_sequence_registers(sequence, base_penalties, coupling_params, flip_params, double_flip_params, temperature):
     """Find the ensemble energy for each register"""
+
     linear_binding_ddGs = get_noflip_registers(sequence, base_penalties, coupling_params)
     oneflip_binding_ddGs = get_1flip_registers(sequence, base_penalties, coupling_params, flip_params)
     twoflip_binding_ddGs = get_2flip_registers(sequence, base_penalties, coupling_params, flip_params, double_flip_params)
@@ -350,9 +359,11 @@ def additive_PUF_flip_model(passed_sequence, flip_params, base_penalties, coupli
         
         # 2x1nt flips
         for flip_pos1, flip_pos2 in itertools.combinations(possible_flip_positions, 2):
-            seq_not_flipped = current_sequence[:flip_pos1]+current_sequence[flip_pos1+1:flip_pos2] + current_sequence[flip_pos2+1:]
+            # 20180629 adjusted indexes :flip_pos2] to :flip_pos2+1] and flip_pos2+1: to flip_pos2+2:
+            seq_not_flipped = current_sequence[:flip_pos1]+current_sequence[flip_pos1+1:flip_pos2+1] + current_sequence[flip_pos2+2:]
             flip_base1 = current_sequence[flip_pos1]
-            flip_base2 = current_sequence[flip_pos2]
+            flip_base2 = current_sequence[flip_pos2+1]
+
 
             dG = (flip_params_exp.loc[flip_pos1, flip_base1]* # this is the penalty of flipping the residue 1
                   flip_params_exp.loc[flip_pos2, flip_base2]* # this is the penalty of flipping the residue 2
@@ -365,7 +376,7 @@ def additive_PUF_flip_model(passed_sequence, flip_params, base_penalties, coupli
         # 1x2nt flips
         for flip_pos in possible_double_flip_pos:
 
-            seq_not_flipped = current_sequence[:flip_pos]+current_sequence[flip_pos+2:]
+            seq_not_flipped = current_sequence[:flip_pos+1]+current_sequence[flip_pos+3:] #20180609 changed from flip_pos to flip_pos+1 and flip_pos+2 to flip_pos+3 WRB
             dG = (double_flip_params_exp.loc[flip_pos]*
                   perfect_match_exp_ddG_coupling_terms(seq_not_flipped, base_penalties_exp, coupling_params_exp,
                                                    get_coupling_bool_term1(flip_pos),
@@ -374,7 +385,6 @@ def additive_PUF_flip_model(passed_sequence, flip_params, base_penalties, coupli
             registers.append('doubleflip_%d;pos_%d'%(i, flip_pos))
 
     ddG = compute_ensemble_ddG(single_ddG_values, temperature)
-    
     if return_ensemble:
         return ddG, pd.Series(ddG_conversion_factor*np.log(single_ddG_values), index=registers)
     else:
