@@ -3,7 +3,6 @@
 This script may be used to plot all the plots in the paper figures.
 
 Run:
-python plot_many_clip_paper.py --mode plot_clip_footprint --data $datafilename 
 python plot_many_clip_paper.py --mode plot_clip_vs_ddG --data $datafilename 
 python plot_many_clip_paper.py --mode plot_overestimation_with_noflip_model --data $datafilename 
 python plot_many_clip_paper.py --mode plot_annotation_vs_ddG --data $datafilename 
