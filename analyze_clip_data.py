@@ -960,6 +960,9 @@ class CombineDataAll(sciluigi.Task):
         
         # load seqdata
         seqdata = pd.read_table(self.in_seq().path, compression='gzip', index_col=0)
+        seqdata.loc[:, 'min_bases_to_TGTA'] = seqdata.loc[:, ['upstream_bases_to_TGTA',
+                                                                'downstream_bases_to_TGTA']].min(axis=1)
+
 
         # load seqdata_effects
         seqeffect =  pd.read_table(self.in_effect().path, compression='gzip', index_col=0)
@@ -967,17 +970,19 @@ class CombineDataAll(sciluigi.Task):
 
         noflip_cols = [idx for idx in seqeffect if idx.find('noflip')==0]
         flip_cols = [idx for idx in seqeffect if idx.find('flip')==0 or idx.find('doubleflip')==0]
-        seqeffect.loc[:, 'ddG_noflip_noens'] = seqeffect.loc[:, noflip_cols[0]]
         seqeffect.loc[:, 'ddG_noflip'] = seqmodel.compute_ensemble_ddG_set(seqeffect.loc[:, noflip_cols], self.temperature)
         seqeffect.loc[:, 'ddG_flip'] = seqmodel.compute_ensemble_ddG_set(seqeffect.loc[:, flip_cols], self.temperature)
         keep_cols = [idx for idx in seqeffect if idx.find('ddG')==0]
         
         # load bed data
         beddata = processing.load_bed(self.in_bed().path, additional_cols=variables.motif_fields_additional).set_index('name')
-        
+        beddata.loc[:, 'in_transcript'] = (beddata.gene_type=='protein-coding')&( # added 2018-07-03 SKD
+            (beddata.annotation == "5' UTR")|(beddata.annotation == "exon")|(beddata.annotation == "3' UTR"))
+                
         # load tpm
-        expression = pd.read_table(self.in_tpm().path, index_col=0, squeeze=True)
-    
+        expression = pd.read_table(self.in_tpm().path, index_col=0)
+        expression.loc[:, 'expressed'] = expression.tpm > 0
+        
         # load ss energy
         ss_dG_data = {}
         for constraint, target in self.in_secstructure.items():
@@ -990,7 +995,12 @@ class CombineDataAll(sciluigi.Task):
         out_data.loc[:, 'clip_signal_per_tpm'] = (out_data.rep1 + out_data.rep2)/out_data.tpm
         out_data.loc[:, 'clip_input_per_tpm'] = (out_data.input)/out_data.tpm
 
-        out_data.to_csv(self.out_table().path, sep='\t', compression='gzip')
+        # remove duplicates
+        out_data = (out_data.reset_index().rename(columns={'index':'name'}).
+                    groupby(['chrm', 'start', 'stop']).first().reset_index().copy())
+
+
+        out_data.to_csv(self.out_table().path, sep='\t', compression='gzip', index=False)
 
 
 class CombineSplitData(sciluigi.Task):
@@ -1012,7 +1022,7 @@ class CombineSplitData(sciluigi.Task):
             
         # load files
         filename_dict = {key:target().path for key, target in self.in_data.items()}
-        table = pd.concat({key:pd.read_table(filename, compression='gzip', index_col=0) for key, filename in filename_dict.items()}, names=['split_id', 'name'])
+        table = pd.concat({key:pd.read_table(filename, compression='gzip', index_col='name') for key, filename in filename_dict.items()}, names=['split_id', 'name'])
         table.reset_index().to_csv(self.out_data().path, index=False, compression='gzip', sep='\t')
 
     
