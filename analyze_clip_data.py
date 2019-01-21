@@ -1,3 +1,18 @@
+"""
+Pipeline to compare in vivo occupancy of PUM2 to putative binding sites to the
+predicted relative occupancy based on in vitro thermodynamic data.
+
+In vivo occupancy is determined from eCLIP data (Van Nostrand, 2016) on PUM2 in
+K562 cells. eCLIP is not normalized for transcript abundance, so transcript abun-
+dance is determined from RNA-seq data from ENCODE on K562 cells.
+
+All input files can be found in the resources/clip_analysis folder. Some other files
+are downloaded directly from ENCODE as the pipeline is running.
+
+Pipeline depends on HOMER, bedtools, RNAfold, and pyatac, and possibly others.
+"""
+
+
 import luigi
 import sciluigi
 import os
@@ -19,8 +34,8 @@ class MyWorkflow(sciluigi.WorkflowTask):
     cores =  luigi.IntParameter(default=1)
     # genome data
     genome = luigi.Parameter(default='hg38')
-    genome_fasta = luigi.Parameter(default='/shr/genomes/fasta/hg38/hg38.fa')
-    genome_size = luigi.Parameter(default='/shr/gSizes/hg38.genomsize')
+    genome_fasta = luigi.Parameter(default='genomes/fasta/hg38.fa')
+    genome_size = luigi.Parameter(default='genomes/sizes/hg38.genomsize')
     
     # CLIP input data
     input_bam = luigi.Parameter(default='CLIP/hPUM2/bams/input.ENCFF786ZZB.bam')
@@ -38,7 +53,6 @@ class MyWorkflow(sciluigi.WorkflowTask):
     temperature = luigi.IntParameter(default=37)
     num_random = luigi.IntParameter(default=5000000)
     randomseed = luigi.FloatParameter(default=np.nan)
-    filter_genetype = luigi.IntParameter(default=1)
     
     # sec structure processing inputs
     ss_window_size = luigi.IntParameter(default=100)
@@ -57,11 +71,8 @@ class MyWorkflow(sciluigi.WorkflowTask):
     
     def workflow(self):
         ####### CLIP ########
-        # download CLIP data
-        # TODO
-        
-        # process CLIP data bams
-        # get the bam file of the clip data
+
+        # process CLIP data bams to retain only the read associated with the crosslink
         processclipbams = {}
         findtotalreads = {}
         outdir_bams = os.path.join(self.outdir, 'bams')
@@ -76,9 +87,6 @@ class MyWorkflow(sciluigi.WorkflowTask):
         for key, processclipbam in processclipbams.items():
              getbedgraphs[key] = self.new_task('getbedgraphs_%s'%key, GetBedGraphFromBam, outdir=outdir_clips, genome_size=self.genome_size)
              getbedgraphs[key].in_bam = processclipbam.out_bam
-        
-        # process CLIP data peaks
-        processclipbeds = self.new_task('processclipbeds%s'%key, ProcessClipPeaks, outdir=os.path.join(self.outdir, 'beds'), bedfile1=self.rep1_peaks, bedfile2=self.rep2_peaks)
         
         ####### FIND REGIONS ########
         # load RNA seq data
@@ -111,24 +119,14 @@ class MyWorkflow(sciluigi.WorkflowTask):
         iter_values = range(num_iter)
 
         for i in iter_values:
-            # normal workflow, i = 1:10:
-            if i < num_iter:
-                # make motif bed
-                makemotifbed = self.new_task('makemotifbed_%d'%i, MakeBedFileHomer, genome=self.genome, seq_length=self.len_consensus_seq, outdir=os.path.join(self.outdir, 'beds/split/%d'%i), motif=self.motif_file)
-                makemotifbed.in_regions = getattr(divideregions, 'out_bed%d'%i)
-                    
-                # combine motif and random bed, annotate, and filter
-                combinebed = self.new_task('combinebeds_%d'%i, scltasks.CombineBeds, outdir=os.path.join(self.outdir, 'beds/split/%d'%i))
-                combinebed.in_beds = [makemotifbed.out_bed, getattr(dividebedrandom, 'out_bed%d'%i)]
-                filter_genetype = bool(self.filter_genetype)
-                ##### TO DO: make TRUE/or an option ####
-            
-            elif i == num_iter:
-                ###### APPEND THE CLIP PEAKS ######
-                makemotifbed = self.new_task('makemotifbed_%d'%i, MakeBedFileHomer, genome=self.genome, seq_length=self.len_consensus_seq, outdir=os.path.join(self.outdir, 'beds/split/%d'%i), motif=self.motif_file)
-                makemotifbed.in_regions = processclipbeds.out_bed ### CLIP PEAK REGIONS
-                combinebed = makemotifbed
-                filter_genetype = False
+
+            # make motif bed
+            makemotifbed = self.new_task('makemotifbed_%d'%i, MakeBedFileHomer, genome=self.genome, seq_length=self.len_consensus_seq, outdir=os.path.join(self.outdir, 'beds/split/%d'%i), motif=self.motif_file)
+            makemotifbed.in_regions = getattr(divideregions, 'out_bed%d'%i)
+                
+            # combine motif and random bed, annotate, and filter
+            combinebed = self.new_task('combinebeds_%d'%i, scltasks.CombineBeds, outdir=os.path.join(self.outdir, 'beds/split/%d'%i))
+            combinebed.in_beds = [makemotifbed.out_bed, getattr(dividebedrandom, 'out_bed%d'%i)]
                 
             # annotate and filter the clip peak motif bed
             annmotifbed = self.new_task('annmotifbed_%d'%i, AnnBedFile, genome=self.genome)
@@ -141,7 +139,7 @@ class MyWorkflow(sciluigi.WorkflowTask):
             splitbedfile = self.new_task('splitbedfile_%d'%i, DividBedByStrand)
             splitbedfile.in_bed_file = filterbed.out_filt_bed
                 
-            # go through bedgraph files and run all clip commands
+            # iterate across the three CLIP bedgraph files (rep1, rep2 and input) and run all clip commands
             outdir_clips = os.path.join(self.outdir, 'clip', 'split_%d'%i, 'strands')
             combinestrandsall = {}
             for key, getbedgraph in getbedgraphs.items():
