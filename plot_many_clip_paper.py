@@ -500,51 +500,18 @@ if __name__ == '__main__':
             pass
             
             
-    elif args.mode == 'compare_to_pum12_kd' or args.mode == 'compare_to_pum2_oe':
+    elif args.mode == 'compare_to_pum12_kd' or args.mode == 'compare_to_pum2_oe' or args.mode=='compare_to_pum12_kd_clip':
         """Load supp data from NAR paper and compare sites."""
-        
-        # load the biomart ref
-        biomart_data = pd.read_table('annotations/ensemble_gene_converter_biomart.txt', names=['gene_id', 'transcript_id', 'gene_name', 'refseq_id', 'refseq_nc'], header=0)
-        biomart_data.loc[:, 'refseq_comb'] = [refseq_id if not str(refseq_id)=='nan' else refseq_nc for idx, refseq_id, refseq_nc in biomart_data.loc[:, ['refseq_id', 'refseq_nc']].itertuples()]
-        if args.mode == 'compare_to_pum12_kd':
-            col_name = 'gene_name'
-        else:
-            col_name = 'gene_id'
-        data.loc[:, 'gene_name'] = pd.Series(biomart_data.groupby('refseq_comb').first().loc[data.refseq_id.dropna()][col_name].values, index=data.refseq_id.dropna().index)
-                
-        # group by the gene and find occupancy and other metrics
-        RT = -seqmodel.get_ddG_conversion(temperature=37)
-        ss_ddG_threshold = 10 # kcal/mol
-        occupancy_data = {}
-        for name, group in data.groupby('gene_name'):
-            # filter all for ss structure
-            group_3UTR = group.loc[(group.annotation=="3' UTR")&(group.ss_ddG < ss_ddG_threshold)]
-            occupancy_3UTR = np.exp(-group_3UTR.ddG/RT).sum()
-            occupancy_noflip_3UTR = np.exp(-group_3UTR.ddG_noflip/RT).sum()
-            num_consensus_3UTR = (group_3UTR.ddG < 0.5).sum()
-            num_consensus_CDS = (group.loc[(group.annotation=="exon")].ddG < 0.5).sum()
-
-            num_sites_2kc_3UTR = (group_3UTR.ddG < 2).sum()
-            num_sites_between1and4kc_3UTR = ((group_3UTR.ddG < 4)&(group_3UTR.ddG >= 1)).sum()
-            min_dG_3UTR = group_3UTR.ddG.min()
-            occupancy_not3UTR = np.exp(-group.loc[group.annotation!="3' UTR"].ddG/RT).sum()
-            occupancy_data[name] = pd.Series({'occupancy_3UTR':occupancy_3UTR,
-                                              'occupancy_noflip_3UTR':occupancy_noflip_3UTR,
-                                              'occupancy_not3UTR':occupancy_not3UTR,
-                                              'min_ddG':min_dG_3UTR,
-                                              'num_consensus_3UTR':num_consensus_3UTR,
-                                              'num_consensus_CDS':num_consensus_CDS,
-                                              'num_sites_2kc_3UTR':num_sites_2kc_3UTR,
-                                              'num_sites_between1and4kc_3UTR':num_sites_between1and4kc_3UTR})
-        occupancy_data = pd.concat(occupancy_data).unstack()
-        occupancy_data.loc[occupancy_data.min_ddG.isnull(), 'min_ddG'] = 10 #kcal.mol
-        
         # load expression data
-        if args.mode == 'compare_to_pum12_kd':
+        if args.mode == 'compare_to_pum12_kd' or args.mode=='compare_to_pum12_kd_clip':
             expression_data = pd.read_csv('annotations/nar-01280/supp_table4.csv')
+            expression_data = expression_data.groupby('gene').first().reset_index().copy()
             expression_data.loc[:, 'lfc'] = expression_data.lfc.replace('#NAME?', np.nan).astype(float).replace(np.inf, np.nan)        
             expression_data.loc[:, 'log_fpkm_cntrl'] = np.log10(expression_data.FPKM_NTC)
             expression_fpkm_bins = [-np.inf, 1, 1.5]
+            expression_data.loc[:, 'expression_change'] = 0
+            expression_data.loc[expression_data.sig_down, 'expression_change'] = -1
+            expression_data.loc[expression_data.sig_up, 'expression_change'] = 1
         elif args.mode == 'compare_to_pum2_oe':
             expression_data = pd.read_table('annotations/GSE75440/GSe75440_PUM2edgeR.txt.gz')
             expression_data.rename(columns={col:col.lower().replace(' ', '_').replace('.', '_')  for col in expression_data}, inplace=True)  
@@ -557,80 +524,143 @@ if __name__ == '__main__':
             expression_data.loc[:, 'sig_down'] = (expression_data.adj_pval_tgw < 1E-2)&(expression_data.lfc < 0)
             #expression_data.set_index('gene', inplace=True)
             expression_fpkm_bins = [-np.inf, 1, 3]
-   
-        # find roc
-        roc_curves = {}
-        for name in occupancy_data:
             
-            expression_data.loc[:, 'occupancy'] = occupancy_data.loc[expression_data.gene, name].values
-            expression_data_sub = expression_data.dropna(subset=['lfc', 'occupancy']).copy()
-            if name=='min_ddG':
-                predicted_up=False
-            else:
-                predicted_up = True
-            roc_curves[('any', name)] =  processing.find_roc_data(expression_data_sub, 'occupancy', 'sig_down')
-            #for expression_threshold in expression_fpkm_bins:
-            #    roc_curves[(expression_threshold, name)] =  processing.find_roc_data(expression_data_sub.loc[expression_data_sub.log_fpkm_cntrl >= expression_threshold], 'occupancy', 'sig_up', predicted_up=predicted_up, )
-        roc_curves = pd.concat(roc_curves, names=['cntrl_expression', 'occ_def', 'occ_val'])
-        g = sns.FacetGrid(data=roc_curves.reset_index(), hue='occ_def', col='cntrl_expression', hue_order=['occupancy_3UTR', 'occupancy_noflip_3UTR', 'occupancy_not3UTR'], palette=['b', 'r', '0.5'], ); g.map(plt.plot, 'fpr', 'tpr', )
-        g = sns.FacetGrid(data=roc_curves.reset_index(), hue='occ_def', col='cntrl_expression', hue_order=['occupancy_3UTR', 'min_ddG', 'num_sites_2kc_3UTR', 'num_sites_between1and4kc_3UTR'], palette=['b', 'g', 'm', 'c'], ); g.map(plt.plot, 'fpr', 'tpr', )
-
-        # find ROC curve for genes with NO consensus sites
-        expression_data.loc[:, 'occupancy'] = occupancy_data.loc[expression_data.gene, 'occupancy_3UTR'].values
-        expression_data.loc[:, 'has_consensus'] = occupancy_data.loc[expression_data.gene, 'num_consensus_3UTR'].values > 0
-        expression_data_sub = expression_data.dropna(subset=['lfc', 'occupancy'])
-        roc_noconsesus = processing.find_roc_data(expression_data_sub.groupby('has_consensus').get_group(False), 'occupancy', 'sig_up')
-        roc_wconsesus = processing.find_roc_data(expression_data_sub.groupby('has_consensus').get_group(True), 'occupancy', 'sig_up')
+        # load the biomart ref
+        biomart_data = pd.read_table('annotations/ensemble_gene_converter_biomart.txt', names=['gene_id', 'transcript_id', 'gene_name', 'refseq_id', 'refseq_nc'], header=0)
+        biomart_data.loc[:, 'refseq_comb'] = [refseq_id if not str(refseq_id)=='nan' else refseq_nc for idx, refseq_id, refseq_nc in biomart_data.loc[:, ['refseq_id', 'refseq_nc']].itertuples()]
+        biomart_data_unique = biomart_data.groupby('refseq_comb').first()
         
-        g = sns.FacetGrid(roc_curves.loc[-np.inf].reset_index(), hue='occ_def', hue_order=['occupancy_3UTR', 'occupancy_not3UTR'], palette=['b', '0.5']); g.map(plt.plot, 'fpr', 'tpr')
-        plt.plot(roc_noconsesus.fpr, roc_noconsesus.tpr, 'b--')
-        idx_noconsensus = np.abs(roc_noconsesus.reset_index().loc[:, 'index'] - 1).sort_values().index[0]
-        plt.scatter(roc_noconsesus.reset_index().loc[idx_noconsensus].fpr, roc_noconsesus.reset_index().loc[idx_noconsensus].tpr, c='b')
-        #plt.plot(roc_wconsesus.fpr, roc_wconsesus.tpr, 'b:')
-        idx_gene_body = np.abs(roc_curves.loc[-np.inf].loc['occupancy_not3UTR'].reset_index().occ_val-1).sort_values().index[0]
-        plt.scatter(roc_curves.loc[-np.inf].loc['occupancy_not3UTR'].reset_index().loc[idx_gene_body].fpr, roc_curves.loc[-np.inf].loc['occupancy_not3UTR'].reset_index().loc[idx_gene_body].tpr, c='0.5')
-        plt.plot([0, 1], [0, 1], 'k--')
-        
-        # plot the roc plot for the other model
-        expression_data.loc[:, 'occupancy'] = occupancy_data.loc[expression_data.gene, 'occupancy_noflip_3UTR'].values
-        expression_data_sub = expression_data.dropna(subset=['lfc', 'occupancy'])
-        roc_noconsesus_noflip = processing.find_roc_data(expression_data_sub.groupby('has_consensus').get_group(False), 'occupancy', 'sig_up')
-        plt.plot(roc_noconsesus_noflip.fpr, roc_noconsesus_noflip.tpr, 'r--')
-        
-
-        print processing.get_tpr_fpr(expression_data_sub.has_consensus, expression_data_sub.sig_up)
-        print processing.get_tpr_fpr(expression_data_sub.loc[~expression_data_sub.has_consensus].occupancy >= 1, expression_data_sub.loc[~expression_data_sub.has_consensus].sig_up)
-        
-        roc = processing.find_roc_data(expression_data_sub, 'occupancy', 'sig_up')
-        
-        # laod 3' UTR length from refseq database
-        
-        bed_data = pd.read_table('annotations/refseq/hg38_refGene.3UTR.bed', names=variables.bed_fields + ['gene_name'], header=0)
-        bed_data.loc[:, 'utr_length'] = bed_data.stop - bed_data.start
-        
-        expression_data.loc[:, "utr_length_min"] = bed_data.groupby('gene_name')['utr_length'].min().loc[expression_data.gene].values
-        expression_data.loc[:, "utr_length_max"] = bed_data.groupby('gene_name')['utr_length'].max().loc[expression_data.gene].values
-        expression_data.loc[:, "utr_length_median"] = bed_data.groupby('gene_name')['utr_length'].median().loc[expression_data.gene].values
-        roc_curves_length = {}
-        for name in ['utr_length_min', 'utr_length_max', 'utr_length_median']:
-            roc_curves_length[name] = processing.find_roc_data(expression_data.dropna(subset=['lfc', name]).copy(), name, 'sig_up')
-        roc_curves_length = pd.concat(roc_curves_length, names=['length_def', 'length_val'])
-        sys.exit()
-        
-        # for each gene in the expression data, find the sites that are associated with it
-        data_subsets = {}
-        for key, idxs in row_subsets.items():
-            print key
-            for i, (idx, gene) in enumerate(expression_data.loc[idxs].gene.iteritems()):
-                if i%10 == 0:
-                    print i
-                possible_refseq_ids = biomart_data.loc[(biomart_data.gene_name==gene)].refseq_comb.dropna().unique().tolist()
-                data_subset = data.loc[pd.Series(np.in1d(data.refseq_id, possible_refseq_ids), index=data.index)&
-                                       (data.annotation=="3' UTR")].copy()
+        if args.mode == 'compare_to_pum12_kd' or 'compare_to_pum12_kd_clip':
+            col_name = 'gene_name'
+        else:
+            col_name = 'gene_id'
+        data.loc[:, 'gene_name'] = pd.Series(biomart_data.groupby('refseq_comb').first().loc[data.refseq_id.dropna()][col_name].values, index=data.refseq_id.dropna().index)
                 
-                data_to_save = pd.Series({'min_ddG':data_subset.ddG.min(), 'median_ddG':data_subset.ddG.median(),
-                                          'num_sites':len(data_subset), 'num_sites_2kc':(data_subset.ddG < 2).sum(),
-                                        'sites_index':data_subset.index.tolist()})
-                data_subsets[(key, gene)] = data_to_save
+        # group by the gene and find occupancy and other metrics
+        RT = -seqmodel.get_ddG_conversion(temperature=37)
+        ss_ddG_threshold = 10 # kcal/mol
+        occupancy_data = {}
+        if args.mode == 'compare_to_pum12_kd_clip':
+            ## find 'occupancy' as just clip signal
+            # laod data
+            data_clip = pd.read_table('analysis/output/peaks.rep1.rep2.st.merged.00.input.ENCFF786ZZB.R2.500.ENCFF732EQX.ENCFF231WHF.combined_data.01.02.03.04.05.06.07.08.09.combined_data.gz', index_col=0)
+            data_clip.loc[:, 'gene_name'] = pd.Series(biomart_data_unique.loc[data_clip.refseq_id.dropna()][col_name].values,
+                                                       index=data_clip.refseq_id.dropna().index)
+            data_clip.loc[:, 'clip_signal'] = data_clip.rep1 + data_clip.rep2
+            data_clip.loc[:, 'clip_signal_perbp'] = data_clip.clip_signal/(data_clip.stop - data_clip.start)
+
+            # data_clip = pd.read_table('CLIP/hPUM2/peaks/peaks.rep1.rep2.st.merged.ann.dat', skiprows=1, header=None,
+            #                           names=['name', 'chr', 'start', 'stop', 'strand', 'score', 'region_size', 'annotation_gene'], usecols=range(8))
+            # annotation = {}
+            # gene = {}
+            # for idx, s in data_clip.annotation_gene.dropna().iteritems():
+            #     s_list = s.split()
+            #     ann = s_list.pop(0)
+            #     if s_list:
+            #         if s_list[0] == 'UTR':
+            #             ann = ann + ' ' + s_list.pop(0)
+            #         gene[idx] = s_list.pop(0).replace('(', '').replace(',', '').replace(')', '')
+            #     annotation[idx] = ann
+            # data_clip.loc[:, 'annotation'] = pd.Series(annotation)
+            # data_clip.loc[:, 'refseq_id'] = pd.Series(gene)
+            # data_clip.loc[:, 'gene_name'] = pd.Series(biomart_data_unique.loc[data_clip.refseq_id.dropna()][col_name].values,
+            #                                           index=data_clip.refseq_id.dropna().index)
+            
+            occupancy_data = {}
+            min_tpm = 1E-3
+            for name, group in data_clip.groupby('gene_name'):
+                group_3UTR = group.loc[group.annotation=="3' UTR"]
+                num_peaks = group.annotation.value_counts()
+                num_peaks.index = ['num_%s'%s for s in num_peaks.index]
+
+                in_both_replicates = (group.name.str.find('rep01')>-1)&(group.name.str.find('rep02')>-1)
+                num_peaks_both_rep = group.loc[in_both_replicates].annotation.value_counts()
+                num_peaks_both_rep.index = ['numboth_%s'%s for s in num_peaks_both_rep.index]
+                transcription_count = group.tpm.mean() + min_tpm
+                signal_all_3UTR =  (group_3UTR.rep1 + group_3UTR.rep2).sum()
+                signal_per_tpm_3UTR = signal_all_3UTR/transcription_count
+                signal_all_non3UTR =  (group.rep1 + group.rep2).loc[group.annotation!="3' UTR"].sum()
+                signal_input_3UTR =  (group.input).loc[group.annotation=="3' UTR"].sum()
+                input_per_tpm_3UTR = signal_input_3UTR/transcription_count
+                occupancy_data[name] = pd.concat([num_peaks, num_peaks_both_rep,
+                                                  pd.Series([signal_all_3UTR, signal_per_tpm_3UTR, signal_all_non3UTR, signal_input_3UTR, input_per_tpm_3UTR],
+                                                    index=['clip_sum_3UTR', 'clip_per_tpm_3UTR', 'clip_sum_non3UTR', 'input_sum_3UTR', 'input_per_tpm_3UTR'])])
+            occupancy_data = pd.concat(occupancy_data).unstack().fillna(0)
+            occupancy_data.loc[:, 'diff_sum_3UTR'] = occupancy_data.clip_sum_3UTR - occupancy_data.input_sum_3UTR
+            expression_data_occ = pd.concat([expression_data.set_index('gene'), occupancy_data], axis=1).fillna(0)
+           
+            # plot counts
+            roc_curves = {}
+            for name in occupancy_data:
+                roc_curves[ name] =  processing.find_roc_data(expression_data_occ, name, 'sig_up')
+            roc_curves = pd.concat(roc_curves, names=['occ_def', 'occ_val'])
+            g = sns.FacetGrid(data=roc_curves.reset_index(), hue='occ_def'); g.map(plt.plot, 'fpr', 'tpr', ); g.add_legend()          
+            
+            g = sns.FacetGrid(data=roc_curves.reset_index(), hue='occ_def', hue_order=['clip_sum_3UTR', 'clip_sum_non3UTR', 'input_sum_3UTR', "num_3' UTR"]); g.map(plt.plot, 'fpr', 'tpr', ); g.add_legend()
+            
+            expression_data_occ.loc[:, 'log_clip_sum_3UTR'] = np.log10(expression_data_occ.clip_sum_3UTR +1)
+            sns.factorplot(data=expression_data_occ, x='expression_change', y='clip_sum_3UTR', kind='bar'); plt.yscale('log')
+
+            # plot venn of upregulated genes and genes with CLIP peak
+            
+                
+        else:
+            occupancy_data = {}
+            for name, group in data.groupby('gene_name'):
+                # filter all for ss structure
+                group_3UTR = group.loc[(group.annotation=="3' UTR")&(group.ss_ddG < ss_ddG_threshold)]
+                occupancy_3UTR = np.exp(-group_3UTR.ddG/RT).sum()
+                # occupancy_noflip_3UTR = np.exp(-group_3UTR.ddG_noflip/RT).sum()
+                # num_consensus_3UTR = (group_3UTR.ddG < 0.5).sum()
+                # num_consensus_CDS = (group.loc[(group.annotation=="exon")].ddG < 0.5).sum()
+                # 
+                # num_sites_2kc_3UTR = (group_3UTR.ddG < 2).sum()
+                # num_sites_between1and4kc_3UTR = ((group_3UTR.ddG < 4)&(group_3UTR.ddG >= 1)).sum()
+                # min_dG_3UTR = group_3UTR.ddG.min()
+                occupancy_not3UTR = np.exp(-group.loc[group.annotation!="3' UTR"].ddG/RT).sum()
+                occupancy_data[name] = pd.Series({'occupancy_3UTR':occupancy_3UTR,
+                                                  # 'occupancy_noflip_3UTR':occupancy_noflip_3UTR,
+                                                  'occupancy_not3UTR':occupancy_not3UTR,
+                                                  # 'min_ddG':min_dG_3UTR,
+                                                  # 'num_consensus_3UTR':num_consensus_3UTR,
+                                                  # 'num_consensus_CDS':num_consensus_CDS,
+                                                  # 'num_sites_2kc_3UTR':num_sites_2kc_3UTR,
+                                                  # 'num_sites_between1and4kc_3UTR':num_sites_between1and4kc_3UTR,
+                                                  'clip_sum_3UTR':(group_3UTR.rep1 + group_3UTR.rep2).sum(),
+                                                  'clip_signal_per_tpm_3UTR':(group_3UTR.rep1 + group_3UTR.rep2).sum()/group.tpm.sum(),
+                                                  'clip_signal_per_tpm_3UTR2':(group_3UTR.rep1 + group_3UTR.rep2).sum()/group.tpm.mean(),
+
+                                                  'clip_input_3UTR':(group_3UTR.input).sum(),
+                                                  'clip_input_per_tpm_3UTR':(group_3UTR.input).sum()/group.tpm.sum() })
+            occupancy_data = pd.concat(occupancy_data).unstack()
+            #occupancy_data.loc[occupancy_data.min_ddG.isnull(), 'min_ddG'] = 10 #kcal.mol
         
- 
+
+   
+            # find roc
+            direction = 'sig_up'
+            for direction in ['sig_down', 'sig_up']:
+                roc_curves = {}
+                for name in occupancy_data:
+                    
+                    expression_data.loc[:, 'occupancy'] = occupancy_data.loc[expression_data.gene, name].values
+                    expression_data_sub = expression_data.dropna(subset=['lfc', 'occupancy']).copy()
+                    if name=='min_ddG':
+                        predicted_up=False
+                    else:
+                        predicted_up = True
+                    roc_curves[name] =  processing.find_roc_data(expression_data_sub, 'occupancy', direction)
+                    #for expression_threshold in expression_fpkm_bins:
+                    #    roc_curves[(expression_threshold, name)] =  processing.find_roc_data(expression_data_sub.loc[expression_data_sub.log_fpkm_cntrl >= expression_threshold], 'occupancy', 'sig_up', predicted_up=predicted_up, )
+                roc_curves = pd.concat(roc_curves, names=['occ_def', 'occ_val'])
+                g = sns.FacetGrid(data=roc_curves.reset_index(), hue='occ_def' );
+                g.map(plt.plot, 'fpr', 'tpr', ); g.add_legend()
+                g = sns.FacetGrid(data=roc_curves.reset_index(), hue='occ_def',
+                                  hue_order=['occupancy_3UTR',  'occupancy_not3UTR'], palette=['b',  '0.5'], );
+                g.map(plt.plot, 'fpr', 'tpr', )
+
+
+            # plot barplot
+            name = 'occupancy_3UTR'
+            expression_data.loc[:, 'occupancy'] = occupancy_data.loc[expression_data.gene, name].values
+            sns.factorplot(data=expression_data, x='expression_change', y="occupancy", kind='bar');

@@ -136,7 +136,7 @@ def find_roc_data(data, prediction_column, actual_column, predicted_up=True,):
     """data is a dataframe containing the prediction column (should be quantitative variable) and actual_column (should be bool)"""
 
     data_sub = data.dropna(subset=[prediction_column, actual_column]).copy()
-    threshold_values = data_sub.loc[:, prediction_column].quantile(np.linspace(0, 1, 500)).unique()
+    threshold_values = data_sub.loc[:, prediction_column].quantile(np.linspace(0, 1, 500)).dropna().unique()
     if len(threshold_values)<=2:
         print "data.loc[:, '%s'] had only two or fewer unique values"%prediction_column
         return
@@ -158,8 +158,10 @@ def find_roc_data(data, prediction_column, actual_column, predicted_up=True,):
 
 def get_tpr_fpr(predicted_bool_vec, actual_bool_vec):
     """Given two vectors, one with True/False predicted values, one with True/Fals,e actual values, and return tpr and fpr"""
+    actual_bool_vec = actual_bool_vec.astype(bool)
+    predicted_bool_vec = predicted_bool_vec.astype(bool)
     num_actual_positive = actual_bool_vec.sum()
-    num_actual_negative = (~actual_bool_vec).sum()
+    num_actual_negative = actual_bool_vec.shape[0] - num_actual_positive
     num_false_positives = (predicted_bool_vec&(~actual_bool_vec)).sum()
     num_true_positives = (predicted_bool_vec&actual_bool_vec).sum()    
     return float(num_true_positives)/num_actual_positive, float(num_false_positives)/num_actual_negative
@@ -174,3 +176,9 @@ def get_counts_from_counts_table(data_table, interval_radius=40, offset=15):
     return data_table.iloc[:, start_loc:end_loc].sum(axis=1)
 
         
+def trapz(y, x):
+    """Return the trapezoidal integrated input"""
+    total = 0
+    for i in range(1, len(y)):
+        total += (y[i] + y[i-1])/2.*(x[i] - x[i-1])
+    return total

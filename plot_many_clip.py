@@ -57,7 +57,8 @@ if __name__ == '__main__':
     temperature = 37    
     data = data_37
     data.loc[:, 'min_bases_to_TGTA'] = data.loc[:, ['upstream_bases_to_TGTA', 'downstream_bases_to_TGTA']].min(axis=1)
-    data.loc[:, 'in_transcript'] = (data.annotation == "5' UTR")|(data.annotation == "exon")|(data.annotation == "3' UTR")
+    data.loc[:, 'in_transcript'] = (data.gene_type=='protein-coding')&( # added 2018-07-03 SKD
+        (data.annotation == "5' UTR")|(data.annotation == "exon")|(data.annotation == "3' UTR"))
     # remove duplicates
     data = data.groupby(['chrm', 'start', 'stop']).first().reset_index().copy()
     
@@ -128,8 +129,8 @@ if __name__ == '__main__':
         for col in ['start', 'stop']:
             data_subset.loc[:, col] = data_subset.loc[:, col].astype(int)
          
-        data_subset.loc[:, variables.bed_fields].to_csv('analysis/beds/hPUM2_all.first_register_consensus.bed',
-                                                        sep='\t', index=False, header=False, float_format='%.2f')
+        #data_subset.loc[:, variables.bed_fields].to_csv('analysis/beds/hPUM2_all.first_register_consensus.bed',
+        #                                                sep='\t', index=False, header=False, float_format='%.2f')
     
     elif args.mode == 'compare_consensus_sites_for_ss_structure':
         """Evaluate secondary structure effects for 8nt constraint and 11nt constraint"""

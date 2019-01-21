@@ -24,6 +24,7 @@ class FilenameToTaskOutput(sciluigi.Task):
     # run
     def run(self):
         pass
+
     
 class CombineBeds(sciluigi.Task):
     """Filter the bed output from HOMER for strandedness, protein-coding, etc."""

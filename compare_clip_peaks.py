@@ -30,7 +30,8 @@ class MyWorkflow(sciluigi.WorkflowTask):
     # CLIP processing inputs
     len_consensus_seq = luigi.IntParameter(default=11)
     check_for_seq = luigi.Parameter(default='TGTA')
-    motif_file = luigi.Parameter(default='annotations/RNAmap/hPUM2_all.motif')
+    #motif_file = luigi.Parameter(default='annotations/RNAmap/hPUM2_all.motif')
+    clip_peaks_file = luigi.Parameter(default='CLIP/hPUM2/peaks/peaks.rep1.rep2.st.merged.bed')
     num_muts = luigi.IntParameter(default=1)
     window_size = luigi.IntParameter(default=500)
     temperature = luigi.IntParameter(default=0)
@@ -53,10 +54,11 @@ class MyWorkflow(sciluigi.WorkflowTask):
     biomart_file = luigi.Parameter(default='annotations/ensemble_gene_converter_biomart.txt')
     
     def workflow(self):
-        ####### CLIP ########
-        # download CLIP data
-        
-        # process CLIP data
+ 
+         # load RNA seq data
+        downloadrna = self.new_task('downloadrna', DownloadRNAseq, outdir=os.path.join(self.outdir, 'expression'))
+
+        # process CLIP data bams
         # get the bam file of the clip data
         processclipbams = {}
         findtotalreads = {}
@@ -73,53 +75,35 @@ class MyWorkflow(sciluigi.WorkflowTask):
              getbedgraphs[key] = self.new_task('getbedgraphs_%s'%key, GetBedGraphFromBam, outdir=outdir_clips, genome_size=self.genome_size)
              getbedgraphs[key].in_bam = processclipbam.out_bam
         
-        ####### FIND REGIONS ########
-        # load RNA seq data
-        downloadrna = self.new_task('downloadrna', DownloadRNAseq, outdir=os.path.join(self.outdir, 'expression'))
+             
+        ####### CLIP ########
+        # starting with merged peak set
+        getpeaks = self.new_task('getpeaksbed', scltasks.FilenameToTaskOutput, filename=self.clip_peaks_file)
 
-        # download and process gencode data
-        downloadgencode = self.new_task('downloadgencode', DownloadGencode, outdir=os.path.join(self.outdir, 'annotations'))
-        findtranscribedregions = self.new_task('findtranscribedregions', FindTranscribedRegions, outdir=os.path.join(self.outdir, 'annotations'))
-        findtranscribedregions.in_annotations = downloadgencode.out_annotations
-
-        # make random bed
-        makerandombed = self.new_task('makerandombed', MakeRandomBed, num_random=self.num_random, outdir=os.path.join(self.outdir, 'beds'), window_size=self.len_consensus_seq, seed=self.randomseed)
-        makerandombed.in_regions = findtranscribedregions.out_bed
-        
+        # annotate and filter the combined motif bed
+        annmotifbed = self.new_task('annmotifbed', AnnBedFile, genome=self.genome)
+        annmotifbed.in_bed = getpeaks.out_file
+        ###NOTE: the below step didn't actually work. Had to manuall change the column names for the gene and strand ($8==$14)&($6==&16)
+        filterbed = self.new_task('filtermotifbed', ApplyFilterBedFile, transcript_bed=self.transcript_bed )
+        filterbed.in_filt_dat = annmotifbed.out_filt_dat
+ 
+ 
         ####### DIVIDE REGIONS FOR MULTIPROCESSING ########
         # divide regions
         divideregions = self.new_task('divideregions', scltasks.DivideBed10, outdir=os.path.join(self.outdir, 'beds/split'))
-        divideregions.in_bed = findtranscribedregions.out_bed
+        divideregions.in_bed = filterbed.out_filt_bed        
 
-        # divide random bed
-        dividebedrandom = self.new_task('dividebedrandom', scltasks.DivideBed10, outdir=os.path.join(self.outdir, 'beds/split'))
-        dividebedrandom.in_bed = makerandombed.out_bed
-        
         combinedataall = {}
         
         ####### FIND MOTIFS IN REGIONS ########
         # iterate over all the region beds
         num_iter = 10
         for i in range(num_iter):
-            # normal workflow, i = 1:10:
-            if i < num_iter:
-                # make motif bed
-                makemotifbed = self.new_task('makemotifbed_%d'%i, MakeBedFileHomer, genome=self.genome, seq_length=self.len_consensus_seq, outdir=os.path.join(self.outdir, 'beds/split/%d'%i), motif=self.motif_file)
-                makemotifbed.in_regions = getattr(divideregions, 'out_bed%d'%i)
-                    
-                # combine motif and random bed, annotate, and filter
-                combinebed = self.new_task('combinebeds_%d'%i, scltasks.CombineBeds, outdir=os.path.join(self.outdir, 'beds/split/%d'%i))
-                combinebed.in_beds = [makemotifbed.out_bed, getattr(dividebedrandom, 'out_bed%d'%i)]
-            
-                # annotate and filter the combined motif bed
-                annmotifbed = self.new_task('annmotifbed_%d'%i, AnnBedFile, genome=self.genome)
-                annmotifbed.in_bed = combinebed.out_bed
-                filterbed = self.new_task('filtermotifbed_%d'%i, ApplyFilterBedFile, transcript_bed=self.transcript_bed )
-                filterbed.in_filt_dat = annmotifbed.out_filt_dat            
 
             # split bed file into strands
             splitbedfile = self.new_task('splitbedfile_%d'%i, DividBedByStrand)
-            splitbedfile.in_bed_file = filterbed.out_filt_bed
+            splitbedfile.in_bed_file = getattr(divideregions, 'out_bed%d'%i)
+                    
                 
             # go through bedgraph files and run all clip commands
             outdir_clips = os.path.join(self.outdir, 'clip', 'split_%d'%i, 'strands')
@@ -144,58 +128,24 @@ class MyWorkflow(sciluigi.WorkflowTask):
     
             # find the transcript count per motif site based on the annotated refseq gene and the rnaseq data
             outdir_tpm = os.path.join(self.outdir, 'expression', 'split_%d'%i)
-            findmotiftpm = self.new_task('findmotiftpm', ProcessRNASeq, biomart_file=self.biomart_file, outdir=outdir_tpm)
-            findmotiftpm.in_bed = filterbed.out_filt_bed
+            findmotiftpm = self.new_task('findmotiftpm_%d'%i, ProcessRNASeq, biomart_file=self.biomart_file, outdir=outdir_tpm)
+            findmotiftpm.in_bed = getattr(divideregions, 'out_bed%d'%i)
             findmotiftpm.in_rna1 = downloadrna.out_rna1
             findmotiftpm.in_rna2 = downloadrna.out_rna2
 
-            ####### FIND SEQUENCE AT MOTIF SITES ########
-    
-            # find sequence of intervals
-            outdir_seq = os.path.join(self.outdir, 'sequences', 'split_%d'%i)
-            findsequence = self.new_task('findsequence', FindSequence, genome_fasta=self.genome_fasta,
-                                         window_size=self.window_size, outdir=outdir_seq)
-            findsequence.in_bed = filterbed.out_filt_bed
-            
-            find_seqdata = self.new_task('findseqdata_%d'%i, FindMotifSequenceData, seq_length=self.len_consensus_seq, check_for_seq=self.check_for_seq,
-                                         window_size=self.window_size, outdir=outdir_seq)
-            find_seqdata.in_fasta = findsequence.out_fasta
-            
-            ####### PREDICT EFFECTS AT MOTIF SITES #######
-            outdir_model = os.path.join(self.outdir, 'effects', 'temp_%d'%(self.temperature), 'split_%d'%i)
-            find_effect = self.new_task('findeffect_%d'%i, FindPredictedSeqEffect, outdir=outdir_model, model_param_basename=self.model_param_basename,
-                                        temperature=self.temperature)
-            find_effect.in_seqdata = find_seqdata.out_seqdata   
-
-            ####### FIND SECONDARY STRUCTURE AT MOTIF SITES ########
         
-            # find the secondary structure energy of the non-random areas
-            outdir_ss = os.path.join(self.outdir, 'sec_structure', 'temp_%d'%(self.temperature), 'split_%d'%i)
-            findsequence = self.new_task('findsequence_ss_%d'%i, FindSequence, genome_fasta=self.genome_fasta,
-                                         window_size=self.ss_window_size, outdir=outdir_ss)
-            findsequence.in_bed = filterbed.out_filt_bed
-            
-            findssenergy = {}
-            for constraint in [False, True]:
-                findssenergy[constraint] = self.new_task('findssenergy_%d_%d'%(constraint, i), FindSSEnergy, seq_length=self.len_consensus_seq,
-                                                         window_size=self.ss_window_size, temperature=self.temperature, outdir=outdir_ss,
-                                             constraint=constraint)
-                findssenergy[constraint].in_fasta = findsequence.out_fasta
-
             ####### COMBINE INFO AT MOTIF SITES ########
             
             # combine data in meaningful way
-            combinedata = self.new_task('combinedata_%d'%i, CombineDataAll, window_size=self.window_size, outdir=os.path.join(self.outdir, 'output', 'split_%d'%i))
+            combinedata = self.new_task('combinedata_%d'%i, CombineClipCounts, window_size=self.window_size, outdir=os.path.join(self.outdir, 'output', 'split_%d'%i))
             combinedata.in_counts = {key:target.out_signal for key, target in combinestrandsall.items()}
-            combinedata.in_seq = find_seqdata.out_seqdata
+            combinedata.in_bed = getattr(divideregions, 'out_bed%d'%i)
             combinedata.in_tpm = findmotiftpm.out_motif_tpm
-            combinedata.in_bed = filterbed.out_filt_bed
-            combinedata.in_effect = find_effect.out_seqdata
-            combinedata.in_secstructure = {key:target.out_rnafold for key, target in findssenergy.items()}
             combinedataall[i] = combinedata
         
         combinesplits = self.new_task('combinesplits', CombineSplitData, outdir = os.path.join(self.outdir, 'output'))
         combinesplits.in_data = {key:target.out_table for key, target in combinedataall.items()}
+
         return combinesplits
 
 
@@ -442,7 +392,7 @@ class ApplyFilterBedFile(sciluigi.Task):
 
         log.info(strand_call)
         subprocess.call(strand_call, shell=True)
-        subprocess.call('rm %s'%filtfile, shell=True)
+        #subprocess.call('rm %s'%filtfile, shell=True)
         
 class MakeRandomBed(sciluigi.Task):
     """Make bed file of intervals within regions of a certain length."""
@@ -940,7 +890,54 @@ class CombineBamCounts(sciluigi.Task):
         bamcounts = pd.Series(bamcounts)
         bamcounts.to_pickle(self.out_bamcounts().path)       
        
+class CombineClipCounts(sciluigi.Task):
+    """Combine al the relevant outputs into a table."""
+    in_counts = None
+    in_bed = None
+    in_tpm = None
+    outdir = luigi.Parameter()
+    window_size = luigi.IntParameter()
 
+    
+    def out_table(self, ):
+        filenames = [target().path for target in self.in_counts.values()]
+        return sciluigi.TargetInfo(self, os.path.join(self.outdir, processing.combine_filenames_split(filenames) + '.combined_data.gz'))
+
+
+    
+    def run(self, ):
+        # make directory f it doesn't exist
+        outdir = self.outdir
+        if not os.path.exists(outdir):
+            os.makedirs(outdir)
+
+        # load counts
+        interval_radius = 40 #1/2 width to sum over
+        offset = 15
+        start_loc = int(self.window_size/2-interval_radius-offset)
+        end_loc = start_loc + interval_radius*2
+        counts = {}
+
+        for key, target in self.in_counts.items():
+
+            counts['%s'%(key)] = pd.read_csv(target().path, compression='gzip', index_col=0).iloc[:, start_loc:end_loc].sum(axis=1)
+        counts = pd.concat(counts).unstack(level=0)
+        
+
+        # load bed data
+        beddata = processing.load_bed(self.in_bed().path, additional_cols=variables.motif_fields_additional).set_index('name')
+        # load tpm
+        expression = pd.read_table(self.in_tpm().path, index_col=0, squeeze=True)
+            
+
+        # combine
+        out_data = pd.concat([beddata, expression, counts], axis=1)
+
+
+        out_data.to_csv(self.out_table().path, sep='\t', compression='gzip')    
+    
+    
+    
 class CombineDataAll(sciluigi.Task):
     """Combine al the relevant outputs into a table."""
     in_counts = None
